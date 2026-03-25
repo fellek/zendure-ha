@@ -552,7 +552,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # stop charging devices
         for d in self.charge:
             # SF 2400 may show more gridInputPower than offGridPower and will be recognized as charging, so set power to 10 instead of 0
-            await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 else 10)
+            # add Guard to prevent drain battery
+            await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 or d.state == DeviceState.SOCEMPTY else 10)
 
         # distribute discharging devices, use produced power first, before adding another device
         dev_start = max(0, setpoint - self.discharge_optimal * 2 - self.discharge_produced) if setpoint > SmartMode.POWER_START else 0
