@@ -11,7 +11,7 @@ from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 
-from .api import Api
+from .api import ZendureApi
 from .const import (
     CONF_APPTOKEN,
     CONF_AUTO_MQTT_USER,
@@ -77,7 +77,7 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
             self._user_input = user_input
 
             try:
-                if await Api.Connect(self.hass, self._user_input, False) is None:
+                if await ZendureApi.Connect(self.hass, self._user_input, False) is None:
                     errors["base"] = "invalid input"
                 else:
                     localmqtt = user_input[CONF_MQTTLOCAL]
@@ -98,7 +98,7 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None and user_input.get(CONF_MQTTSERVER, None) is not None:
             try:
                 self._user_input = self._user_input | user_input if self._user_input else user_input
-                if await Api.Connect(self.hass, self._user_input, False) is None:
+                if await ZendureApi.Connect(self.hass, self._user_input, False) is None:
                     errors["base"] = "invalid input"
             except Exception as err:  # pylint: disable=broad-except
                 errors["base"] = f"invalid input {err}"
@@ -122,7 +122,7 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
                 schema = self.mqtt_schema
             else:
                 try:
-                    if await Api.Connect(self.hass, self._user_input, False) is None:
+                    if await ZendureApi.Connect(self.hass, self._user_input, False) is None:
                         errors["base"] = "invalid input"
                 except Exception as err:  # pylint: disable=broad-except
                     _LOGGER.error(f"Unexpected exception: {err}")

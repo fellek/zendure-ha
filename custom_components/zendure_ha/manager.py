@@ -24,7 +24,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.loader import async_get_integration
 
-from .api import Api
+from .api import ZendureApi
 from .const import (
     CONF_AUTO_MQTT_USER,
     CONF_P1METER,
@@ -59,7 +59,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """Initialize Zendure Manager."""
         super().__init__(hass, _LOGGER, name="Zendure Manager", update_interval=SCAN_INTERVAL, config_entry=entry)
         EntityDevice.__init__(self, hass, "Zendure Manager", "Zendure Manager")
-        self.api = Api()
+        self.api = ZendureApi()
         self.operation: ManagerMode = ManagerMode.OFF
         self.zero_next = datetime.min
         self.zero_fast = datetime.min
@@ -90,7 +90,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.pwr_low = 0
 
     async def loadDevices(self) -> None:
-        if self.config_entry is None or (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None:
+        if self.config_entry is None or (data := await ZendureApi.Connect(self.hass, dict(self.config_entry.data), True)) is None:
             return
         if (mqtt := data.get("mqtt")) is None:
             return
@@ -118,7 +118,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     continue
                 _LOGGER.info(f"Adding device: {deviceId} {prodModel} => {dev}")
 
-                init = Api.createdevice.get(prodModel.lower().strip(), None)
+                init = ZendureApi.createdevice.get(prodModel.lower().strip(), None)
                 if init is None:
                     _LOGGER.info(f"Device {prodModel} is not supported!")
                     continue

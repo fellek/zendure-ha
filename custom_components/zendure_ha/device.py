@@ -35,7 +35,7 @@ from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureRestoreSensor, ZendureSensor
 
 if TYPE_CHECKING:
-    from .api import Api
+    from .api import ZendureApi
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ class ZendureDevice(EntityDevice):
         """Initialize Device."""
         self.prodkey = definition["productKey"]
         super().__init__(hass, deviceId, name, model, self.prodkey, definition["snNumber"], parent)
-        self.api: Api
+        self.api: ZendureApi
         self.snNumber = definition["snNumber"]
         self.definition = definition
         self.fuseGrp: FuseGroup

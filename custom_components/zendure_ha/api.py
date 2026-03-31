@@ -49,7 +49,7 @@ ZENDURE_MANAGER_STORAGE_VERSION = 1
 ZENDURE_DEVICES = "devices"
 
 
-class Api:
+class ZendureApi:
     """Zendure API class."""
 
     createdevice: dict[str, Callable[[HomeAssistant, str, str, Any], ZendureDevice]] = {
@@ -114,7 +114,7 @@ class Api:
     async def Connect(hass: HomeAssistant, data: dict[str, Any], reload: bool) -> dict[str, Any] | None:
         """Connect to the Zendure API."""
         try:
-            devices = await Api.ApiHA(hass, data)
+            devices = await ZendureApi.ApiHA(hass, data)
         except Exception:  # pylint: disable=broad-except
             _LOGGER.error("Failed to connect to Zendure API")
             return None
