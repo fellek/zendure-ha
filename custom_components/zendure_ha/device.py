@@ -8,7 +8,7 @@ import logging
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import ClientTimeout
 from bleak import BleakClient
@@ -33,6 +33,9 @@ from .entity import EntityDevice, EntityZendure
 from .number import ZendureNumber
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureRestoreSensor, ZendureSensor
+
+if TYPE_CHECKING:
+    from .api import Api
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,6 +96,7 @@ class ZendureDevice(EntityDevice):
         """Initialize Device."""
         self.prodkey = definition["productKey"]
         super().__init__(hass, deviceId, name, model, self.prodkey, definition["snNumber"], parent)
+        self.api: Api
         self.snNumber = definition["snNumber"]
         self.definition = definition
         self.fuseGrp: FuseGroup
@@ -178,8 +182,6 @@ class ZendureDevice(EntityDevice):
             _LOGGER.error(f"SetLimits error {self.name} {charge} {discharge}!")
 
     def setStatus(self) -> None:
-        from .api import Api
-
         try:
             if self.lastseen == datetime.min:
                 self.connectionStatus.update_value(0)
@@ -191,7 +193,7 @@ class ZendureDevice(EntityDevice):
                 self.connectionStatus.update_value(3)
             elif self.connection.value == SmartMode.ZENSDK:
                 self.connectionStatus.update_value(12)
-            elif self.mqtt is not None and self.mqtt.host == Api.localServer:
+            elif self.mqtt is not None and self.mqtt.host == self.api.localServer:
                 self.connectionStatus.update_value(11)
             else:
                 self.connectionStatus.update_value(10)
@@ -369,14 +371,12 @@ class ZendureDevice(EntityDevice):
         return True
 
     async def mqttSelect(self, _select: ZendureRestoreSelect, _value: Any) -> None:
-        from .api import Api
-
         self.mqtt = None
         if self.lastseen != datetime.min:
             if self.connection.value == 0:
-                await self.bleMqtt(Api.mqttCloud)
+                await self.bleMqtt(self.api.mqttCloud)
             elif self.connection.value == 1:
-                await self.bleMqtt(Api.mqttLocal)
+                await self.bleMqtt(self.api.mqttLocal)
 
         _LOGGER.debug(f"Mqtt selected {self.name}")
 
@@ -482,11 +482,9 @@ class ZendureDevice(EntityDevice):
 
     async def bleMqtt(self, mqtt: mqtt_client.Client) -> bool:
         """Set the MQTT server for the device via BLE."""
-        from .api import Api
-
         msg: str | None = None
         try:
-            if Api.wifipsw == "" or Api.wifissid == "":
+            if self.api.wifipsw == "" or self.api.wifissid == "":
                 msg = "No WiFi credentials or connections found"
                 return False
 
@@ -524,8 +522,8 @@ class ZendureDevice(EntityDevice):
                             "iotUrl": mqtt.host,
                             "messageId": 1002,
                             "method": "token",
-                            "password": Api.wifipsw,
-                            "ssid": Api.wifissid,
+                            "password": self.api.wifipsw,
+                            "ssid": self.api.wifissid,
                             "timeZone": "GMT+01:00",
                             "token": "abcdefgh",
                         },
@@ -657,22 +655,18 @@ class ZendureLegacy(ZendureDevice):
             self.bleAdapter.setDict(self.ble_adapter_options())
 
     async def button_press(self, button: ZendureButton) -> None:
-        from .api import Api
-
         match button.translation_key:
             case "mqtt_reset":
                 _LOGGER.info(f"Resetting MQTT for {self.name}")
-                await self.bleMqtt(Api.mqttCloud if self.connection.value == 0 else Api.mqttLocal)
+                await self.bleMqtt(self.api.mqttCloud if self.connection.value == 0 else self.api.mqttLocal)
 
     async def dataRefresh(self, _update_count: int) -> None:
         """Refresh the device data."""
-        from .api import Api
-
         if self.lastseen != datetime.min:
             self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.mqtt)
         else:
-            self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, Api.mqttCloud)
-            self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, Api.mqttLocal)
+            self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.api.mqttCloud)
+            self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.api.mqttLocal)
 
     def mqttMessage(self, topic: str, payload: Any) -> bool:
         if topic == "register/replay":
@@ -693,17 +687,15 @@ class ZendureZenSdk(ZendureDevice):
         self.httpid = 0
 
     async def mqttSelect(self, select: Any, _value: Any) -> None:
-        from .api import Api
-
         self.mqtt = None
         match select.value:
             case 0:
-                Api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
-                Api.mqttCloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
+                self.api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
+                self.api.mqttCloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
 
             case 2:
-                Api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
-                Api.mqttCloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
+                self.api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
+                self.api.mqttCloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
 
         _LOGGER.debug(f"Mqtt selected {self.name}")
 

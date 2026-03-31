@@ -6,7 +6,6 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
-from .api import Api
 from .const import CONF_MQTTLOG, CONF_P1METER, CONF_SIM, DOMAIN
 from .device import ZendureDevice
 from .manager import ZendureConfigEntry, ZendureManager
@@ -30,7 +29,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> b
 async def update_listener(_hass: HomeAssistant, entry: ZendureConfigEntry) -> None:
     """Handle options update."""
     _LOGGER.debug("Updating Zendure config entry: %s", entry.entry_id)
-    Api.mqttLogging = entry.data.get(CONF_MQTTLOG, False)
+    entry.runtime_data.api.mqttLogging = entry.data.get(CONF_MQTTLOG, False)
     ZendureManager.simulation = entry.data.get(CONF_SIM, False)
     entry.runtime_data.update_p1meter(entry.data.get(CONF_P1METER, "sensor.power_actual"))
 
@@ -41,11 +40,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> 
     result = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if result:
         manager = entry.runtime_data
-        if Api.mqttCloud.is_connected():
-            Api.mqttCloud.disconnect()
-        if Api.mqttLocal.is_connected():
-            Api.mqttLocal.disconnect()
-        for c in Api.devices.values():
+        if manager.api.mqttCloud.is_connected():
+            manager.api.mqttCloud.disconnect()
+        if manager.api.mqttLocal.is_connected():
+            manager.api.mqttLocal.disconnect()
+        for c in manager.api.devices.values():
             if c.zendure is not None and c.zendure.is_connected():
                 c.zendure.disconnect()
             c.zendure = None

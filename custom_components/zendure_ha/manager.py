@@ -125,13 +125,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
                 # create the device and mqtt server
                 device = init(self.hass, deviceId, dev.get("deviceName", prodModel), dev)
+                device.api = self.api
                 device.discharge_start = device.discharge_limit // 10
                 device.discharge_optimal = device.discharge_limit // 4
-                Api.devices[deviceId] = device
+                self.api.devices[deviceId] = device
 
                 # Check if we should automatically manage MQTT users (opt-in)
                 auto_mqtt = self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)
-                if auto_mqtt and Api.localServer is not None and Api.localServer != "":
+                if auto_mqtt and self.api.localServer is not None and self.api.localServer != "":
                     try:
                         psw = hashlib.md5(deviceId.encode()).hexdigest().upper()[8:24]  # noqa: S324
                         provider: auth_ha.HassAuthProvider = auth_ha.async_get_provider(self.hass)
@@ -156,7 +157,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 _LOGGER.error(f"Unable to create device {e}!")
                 _LOGGER.error(traceback.format_exc())
 
-        self.devices = list(Api.devices.values())
+        self.devices = list(self.api.devices.values())
         _LOGGER.info(f"Loaded {len(self.devices)} devices")
 
         # initialize the api & p1 meter

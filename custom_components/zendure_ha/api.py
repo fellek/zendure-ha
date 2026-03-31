@@ -72,40 +72,43 @@ class Api:
         "superbase v6400": SuperBaseV6400,
         "superbase v4600": SuperBaseV4600,
     }
-    mqttCloud = mqtt_client.Client(userdata="cloud")
-    mqttLocal = mqtt_client.Client(userdata="local")
-    mqttLogging: bool = False
-    devices: dict[str, ZendureDevice] = {}
-    cloudServer: str = ""
-    cloudPort: str = ""
-    localServer: str = ""
-    localPort: str = ""
-    localUser: str = ""
-    localPassword: str = ""
-    wifipsw: str = ""
-    wifissid: str = ""
+
+    def __init__(self) -> None:
+        """Initialize Zendure Api."""
+        self.mqttCloud = mqtt_client.Client(userdata="cloud")
+        self.mqttLocal = mqtt_client.Client(userdata="local")
+        self.mqttLogging: bool = False
+        self.devices: dict[str, ZendureDevice] = {}
+        self.cloudServer: str = ""
+        self.cloudPort: str = ""
+        self.localServer: str = ""
+        self.localPort: str = ""
+        self.localUser: str = ""
+        self.localPassword: str = ""
+        self.wifipsw: str = ""
+        self.wifissid: str = ""
 
     def Init(self, data: Mapping[str, Any], mqtt: Mapping[str, Any]) -> None:
-        """Initialize Zendure Api."""
-        Api.mqttLogging = data.get(CONF_MQTTLOG, False)
-        Api.mqttCloud.__init__(mqtt_enums.CallbackAPIVersion.VERSION2, mqtt["clientId"], False, "cloud", mqtt_enums.MQTTProtocolVersion.MQTTv31)
+        """Initialize MQTT connections."""
+        self.mqttLogging = data.get(CONF_MQTTLOG, False)
+        self.mqttCloud.__init__(mqtt_enums.CallbackAPIVersion.VERSION2, mqtt["clientId"], False, "cloud", mqtt_enums.MQTTProtocolVersion.MQTTv31)
         url = mqtt["url"]
-        Api.cloudServer, Api.cloudPort = url.rsplit(":", 1) if ":" in url else (url, "1883")
-        self.mqttInit(Api.mqttCloud, Api.cloudServer, Api.cloudPort, mqtt["username"], mqtt["password"])
+        self.cloudServer, self.cloudPort = url.rsplit(":", 1) if ":" in url else (url, "1883")
+        self.mqttInit(self.mqttCloud, self.cloudServer, self.cloudPort, mqtt["username"], mqtt["password"])
 
         # Get wifi settings
-        Api.wifissid = data.get(CONF_WIFISSID, "")
-        Api.wifipsw = data.get(CONF_WIFIPSW, "")
+        self.wifissid = data.get(CONF_WIFISSID, "")
+        self.wifipsw = data.get(CONF_WIFIPSW, "")
 
         # Get local Mqtt settings
-        Api.localServer = data.get(CONF_MQTTSERVER, "")
-        Api.localPort = data.get(CONF_MQTTPORT, 1883)
-        Api.localUser = data.get(CONF_MQTTUSER, "")
-        Api.localPassword = data.get(CONF_MQTTPSW, "")
-        if Api.localServer != "":
-            clientId = Api.localUser + str(secrets.randbelow(10000))
+        self.localServer = data.get(CONF_MQTTSERVER, "")
+        self.localPort = data.get(CONF_MQTTPORT, 1883)
+        self.localUser = data.get(CONF_MQTTUSER, "")
+        self.localPassword = data.get(CONF_MQTTPSW, "")
+        if self.localServer != "":
+            clientId = self.localUser + str(secrets.randbelow(10000))
             self.mqttLocal.__init__(mqtt_enums.CallbackAPIVersion.VERSION2, clientId, True, "local", mqtt_enums.MQTTProtocolVersion.MQTTv31)
-            self.mqttInit(self.mqttLocal, Api.localServer, Api.localPort, Api.localUser, Api.localPassword)
+            self.mqttInit(self.mqttLocal, self.localServer, self.localPort, self.localUser, self.localPassword)
 
     @staticmethod
     async def Connect(hass: HomeAssistant, data: dict[str, Any], reload: bool) -> dict[str, Any] | None:
@@ -210,8 +213,8 @@ class Api:
             for device in self.devices.values():
                 if client == device.zendure:
                     client.subscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
-                    Api.mqttCloud.unsubscribe(f"/{device.prodkey}/{device.deviceId}/#")
-                    Api.mqttCloud.unsubscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
+                    self.mqttCloud.unsubscribe(f"/{device.prodkey}/{device.deviceId}/#")
+                    self.mqttCloud.unsubscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
         else:
             for device in self.devices.values():
                 client.subscribe(f"/{device.prodkey}/{device.deviceId}/#")
