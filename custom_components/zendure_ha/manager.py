@@ -12,6 +12,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from math import sqrt
 from typing import Any
+from pathlib import Path
 
 from homeassistant.auth.const import GROUP_ID_USER
 from homeassistant.auth.providers import homeassistant as auth_ha
@@ -45,7 +46,6 @@ SCAN_INTERVAL = timedelta(seconds=60)
 _LOGGER = logging.getLogger(__name__)
 
 type ZendureConfigEntry = ConfigEntry[ZendureManager]
-
 
 class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     """Class to regular update devices."""
@@ -88,7 +88,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.pwr_low = 0
 
     async def loadDevices(self) -> None:
-        if self.config_entry is None or (data := await ZendureApi.connect(self.hass, dict(self.config_entry.data), True)) is None:
+        if self.config_entry is None or (
+        data := await ZendureApi.connect(self.hass, dict(self.config_entry.data), True)) is None:
             return
         if (mqtt := data.get("mqtt")) is None:
             return
@@ -100,11 +101,22 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return
         self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
 
+        # --- NEU: API sauber vor der Schleife erstellen ---
+        self.api = ZendureApi(
+            self.hass,
+            self.config_entry.data,
+            mqtt
+        )
+        # ----------------------------------------
+
         self.operationmode = (
-            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"}, self.update_operation),
+            ZendureRestoreSelect(self, "Operation",
+                                 {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging",
+                                  5: "store_solar"}, self.update_operation),
         )
         self.operationstate = ZendureSensor(self, "operation_state")
-        self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
+        self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000,
+                                                NumberMode.BOX, True)
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
@@ -114,7 +126,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             try:
                 if (deviceId := dev["deviceKey"]) is None or (prodModel := dev["productModel"]) is None:
                     continue
-                # remove F-Strings from Logger
                 _LOGGER.info("Adding device: %s %s => %s", deviceId, prodModel, dev)
 
                 init = ZendureApi.createdevice.get(prodModel.lower().strip(), None)
@@ -124,17 +135,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
                 # create the device and mqtt server
                 device = init(self.hass, deviceId, dev.get("deviceName", prodModel), dev)
-                if not hasattr(self, 'api'):
-                    self.api = ZendureApi(
-                        hass=self.hass,
-                        data=self.config_entry.data,
-                        mqtt=mqtt
-                    )
+
+                # --- LÖSCHEN: Das alte hasattr ist jetzt obsolet! ---
+                # if not hasattr(self, 'api'):
+                #     self.api = ZendureApi(...)
+                # ---------------------------------------
 
                 device.api = self.api
+                self.api.devices[deviceId] = device
                 device.discharge_start = device.discharge_limit // 10
                 device.discharge_optimal = device.discharge_limit // 4
-                self.api.devices[deviceId] = device
 
                 # Check if we should automatically manage MQTT users (opt-in)
                 auto_mqtt = self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)
@@ -166,7 +176,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         _LOGGER.info("Loaded %s devices", len(self.devices))
 
         # initialize the api & p1 meter
-        #self.api.Init(self.config_entry.data, mqtt)
         await self.update_fusegroups()
         self.update_p1meter(self.config_entry.data.get(CONF_P1METER, "sensor.power_actual"))
         await asyncio.sleep(1)  # allow other tasks to run
@@ -321,49 +330,51 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         else:
             self.p1meterEvent = None
 
-    def writeSimulation(self, time: datetime, p1: int) -> None:
-        sim_path = self.hass.config.path("simulation.csv")
-        if not sim_path.exists():
-            with sim_path.open("w") as f:
-                f.write(
-                    "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;"
-                    + ";".join(
-                        [
-                            f"bat;Prod;Home;{
-                                json.dumps(
-                                    DeviceSettings(
-                                        d.name,
-                                        d.fuseGrp.name,
-                                        d.charge_limit,
-                                        d.discharge_limit,
-                                        d.maxSolar,
-                                        d.kWh,
-                                        d.socSet.asNumber,
-                                        d.minSoc.asNumber,
-                                    ),
-                                    default=vars,
-                                )
-                            }"
-                            for d in self.devices
-                        ]
-                    )
-                    + "\n"
-                )
+    async def writeSimulation(self, time: datetime, p1: int) -> None:
+        """Write simulation data to CSV in a background thread to avoid blocking the event loop."""
+        if not self.simulation:
+            return
 
-        with sim_path.open("a") as f:
-            data = ""
-            tbattery = 0
-            tsolar = 0
-            thome = 0
+        # 1. Daten sauber sammeln (ohne self im Hintergrund)
+        time_str = time.isoformat()
+        rows = [f"{time_str};{p1};{self.operation.value}"]  # Enums erben von Natur aus einem String
 
-            for d in self.devices:
-                tbattery += (pwr_battery := d.batteryOutput.asInt - d.batteryInput.asInt)
-                tsolar += (pwr_solar := d.solarInput.asInt)
-                thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
-                data += f";{pwr_battery};{pwr_solar};{pwr_home};{d.electricLevel.asInt}"
+        for d in self.devices:
+            tbattery = d.batteryOutput.asInt - d.batteryInput.asInt
+            tsolar = d.solarInput.asInt
+            thome = d.homeOutput.asInt - d.homeInput.asInt
+            rows.append(f";{tbattery};{tsolar};{thome};{d.electricLevel.asInt}")
+        rows.append(f";{self.manualpower.asNumber}")
 
-            f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.manualpower.asNumber};" + data + "\n")
+        # 2. CSV-String generieren
+        csv_content = "\n".join(rows) + "\n"
 
+        # 3. Sicheres Abkoppeln: Keine self-Abhängigkeit im Hintergrund!
+        await self.hass.async_add_executor_job(
+            self._sync_write_sim,
+            self.hass.config.path("simulation.csv"),
+            csv_content,
+            devices=self.devices  # <-- Übergabe die Liste der Geräte als Parameter!
+        )
+    @staticmethod
+    def _sync_write_sim(path: Path, content: str, devices: list[ZendureDevice] | None = None) -> None:
+        """Synchronous file writer for background execution."""
+        write_header = not path.exists()
+        header = ""
+
+        # Header nur generieren, wenn die Datei neu erstellt wird
+        if write_header and devices:
+            header = "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;" + ";".join([
+                f"bat;Prod;Home;{json.dumps(DeviceSettings(d.name, d.fugeGrp.name, d.charge_limit, d.discharge_limit, d.maxSolar, d.kWh, d.socSet.asNumber, d.minSoc.asNumber, default=vars))}"
+                for d in devices
+                ]) + "\n"
+
+        # Datei öffnen und schreiben
+        with open(path, "a") as f:
+            if write_header:
+                f.write(header)
+            f.write(content)
+                        
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
         # exit if there is nothing to do
         if not self.hass.is_running or (new_state := event.data["new_state"]) is None:
@@ -398,31 +409,34 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if isFast or time > self.zero_next:
             try:
                 # prevent updates during power distribution changes
-                self.zero_fast = datetime.max
-                self.charge.clear()
-                self.charge_limit = 0
-                self.charge_optimal = 0
-                self.charge_weight = 0
-                self.discharge.clear()
-                self.discharge_bypass = 0
-                self.discharge_limit = 0
-                self.discharge_optimal = 0
-                self.discharge_produced = 0
-                self.discharge_weight = 0
-                self.idle.clear()
-                self.idle_lvlmax = 0
-                self.idle_lvlmin = 100
-                self.produced = 0
-                for fg in self.fuse_groups:
-                    fg.initPower = True
+                self._reset_power_state()
                 await self.powerChanged(p1, isFast, time)
             except Exception as err:
                 _LOGGER.error("Error in power distribution: %s", err)
                 _LOGGER.error(traceback.format_exc())
-
             time = datetime.now()
             self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
             self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
+
+    def _reset_power_state(self) -> None:
+        """Reset all power distribution lists and counters before recalculating."""
+        self.zero_fast = datetime.max
+        self.charge.clear()
+        self.charge_limit = 0
+        self.charge_optimal = 0
+        self.charge_weight = 0
+        self.discharge.clear()
+        self.discharge_bypass = 0
+        self.discharge_limit = 0
+        self.discharge_optimal = 0
+        self.discharge_produced = 0
+        self.discharge_weight = 0
+        self.idle.clear()
+        self.idle_lvlmax = 0
+        self.idle_lvlmin = 100
+        self.produced = 0
+        for fg in self.fuse_groups:
+            fg.initPower = True
 
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""

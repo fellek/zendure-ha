@@ -18,15 +18,21 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> bool:
     """Set up Zendure as config entry."""
     manager = ZendureManager(hass, entry)
-    await manager.loadDevices()
     entry.runtime_data = manager
 
     # WICHTIG: shutdown() stoppt die MQTT Threads (loop_stop), wenn HA neu startet
     if hasattr(manager, 'api'):
         entry.async_on_unload(manager.api.shutdown)
 
+    # 1. ZUERST Plattformen laden (das setzt die .add, .update etc. Variablen in den Entitäten)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # 2. DANN Geräte laden (jetzt können die Entitäten sich sicher selbst anmelden)
+    await manager.loadDevices()
+
+    # 3. Zuletzt den Coordinator starten
     await manager.async_config_entry_first_refresh()
+
     entry.async_on_unload(entry.add_update_listener(update_listener))
     return True
 

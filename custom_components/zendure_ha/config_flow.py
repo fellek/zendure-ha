@@ -164,11 +164,17 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
+    # dummy method for Ruff-Linter
+    def async_get_options_flow(_config_entry: ZendureConfigEntry) -> ZendureOptionsFlowHandler:
+        """Get the options flow for this handler."""
+        return ZendureOptionsFlowHandler()
+
     @staticmethod
     @callback
     def async_get_options_flow(_config_entry: ZendureConfigEntry) -> ZendureOptionsFlowHandler:
         """Get the options flow for this handler."""
         return ZendureOptionsFlowHandler()
+
 
     async def async_step_reconfigure_local(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle the reconfigure step for local MQTT settings."""
@@ -197,12 +203,6 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(_config_entry: ZendureConfigEntry) -> ZendureOptionsFlowHandler:
-        """Get the options flow for this handler."""
-        return ZendureOptionsFlowHandler()
 
 class ZendureOptionsFlowHandler(OptionsFlow):
     """Handles the options flow."""
