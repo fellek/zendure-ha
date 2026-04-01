@@ -201,6 +201,31 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         await asyncio.sleep(1)  # allow other tasks to run
 
+        # After startup, if the operation mode was restored (e.g. MANUAL),
+        # trigger an initial power distribution. Without this, MANUAL mode
+        # would sit idle until the first P1 meter event arrives.
+        if self.operation != ManagerMode.OFF and any(d.online for d in self.devices):
+            _LOGGER.info("Startup: triggering initial power distribution for %s", self.operation)
+            try:
+                self._reset_power_state()
+                p1 = 0
+                if (entity := self.hass.states.get(self.config_entry.data.get(CONF_P1METER, ""))) is not None:
+                    try:
+                        p1 = int(self.p1_factor * float(entity.state))
+                    except (ValueError, TypeError):
+                        pass
+                await self.powerChanged(p1, False, datetime.now())
+            except Exception as err:
+                _LOGGER.error("Startup power distribution failed: %s", err)
+            finally:
+                # _reset_power_state() sets zero_fast=datetime.max to prevent
+                # re-entry during processing. In _p1_changed this is reset at
+                # line 457, but our direct call bypasses that — so we must
+                # reset it here, otherwise ALL future P1 events are blocked.
+                now = datetime.now()
+                self.zero_fast = now + timedelta(seconds=SmartMode.TIMEFAST)
+                self.zero_next = now + timedelta(seconds=SmartMode.TIMEZERO)
+
     async def update_fusegroups(self) -> None:
         _LOGGER.info("Update fusegroups")
 
@@ -496,18 +521,35 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         d.name, d.homeInput.asInt, d.pwr_offgrid, home, d.state.name, d.electricLevel.asInt, -d.homeInput.asInt,
                     )
                 # SOCEMPTY means, it could not discharge the battery, but it is still possible to feed into the home using solarpower or offGrid
-                elif (home := d.homeOutput.asInt) > 0:
+                elif (home := d.homeOutput.asInt) > 0 or max(0, d.pwr_offgrid) > 0:
                     self.discharge.append(d)
                     self.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
                     self.discharge_limit += d.fuseGrp.discharge_limit(d)
                     self.discharge_optimal += d.discharge_optimal
                     self.discharge_produced -= d.pwr_produced
                     self.discharge_weight += d.pwr_max * d.electricLevel.asInt
-                    setpoint += home - max(0, d.pwr_offgrid)
-                    _LOGGER.debug(
-                        "Classify %s => DISCHARGE: homeOutput=%s offgrid=%s state=%s soc=%s setpoint_delta=%s",
-                        d.name, d.homeOutput.asInt, d.pwr_offgrid, d.state.name, d.electricLevel.asInt, home - max(0, d.pwr_offgrid),
-                    )
+
+                    # NEUE MATHEMATIK FÜR AC-WECHSELRICHTER (SolarFlow 2400 AC)
+                    net_battery = home - max(0, d.pwr_offgrid)
+
+                    if home == 0 and net_battery <= 0:
+                        # WAKEUP: Wechselrichter schläft, zieht aber 'offgrid' aus dem Netz.
+                        # Da P1 hinter dem Wechselrichter misst, sieht P1 diesen Verbrauch nicht.
+                        # Wir senden einfach nur den P1-Wert. Das deckt den Hausverbrauch perfekt,
+                        # ohne dass wir ungewollt einspeisen (wie es passiert wäre, wenn wir offgrid addieren).
+                        _LOGGER.debug(
+                            "Classify %s => DISCHARGE (WAKEUP): homeOutput=%s offgrid=%s state=%s soc=%s",
+                            d.name, d.homeOutput.asInt, d.pwr_offgrid, d.state.name, d.electricLevel.asInt,
+                        )
+                    else:
+                        # ACTIVE: Wechselrichter ist aktiv (entlädt Akku oder leitet durch).
+                        # Wir MÜSSEN net_battery addieren, sonst oszilliert die Leistung!
+                        # Beispiel: P1=10, homeOutput=181 -> setpoint wird 10+135=145W.
+                        setpoint += home
+                        _LOGGER.debug(
+                            "Classify %s => DISCHARGE (ACTIVE): homeOutput=%s offgrid=%s state=%s soc=%s setpoint_delta=%s",
+                            d.name, d.homeOutput.asInt, d.pwr_offgrid, d.state.name, d.electricLevel.asInt, net_battery,
+                        )
 
                 else:
                     self.idle.append(d)
@@ -561,8 +603,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # Manual power into or from home
                 if (setpoint := int(self.manualpower.asNumber)) > 0:
                     await self.power_discharge(setpoint)
+                    _LOGGER.info("Set Manual power discharging: isFast:%s, setpoint:%sW stored:%sW", isFast, setpoint, self.produced)
                 else:
                     await self.power_charge(setpoint, time)
+                    _LOGGER.info("Set Manual power charging: isFast:%s, setpoint:%sW stored:%sW", isFast, setpoint, self.produced)
 
             case ManagerMode.OFF:
                 self.operationstate.update_value(ManagerState.OFF.value)
