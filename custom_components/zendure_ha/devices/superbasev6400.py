@@ -18,11 +18,11 @@ class SuperBaseV6400(ZendureLegacy):
         super().__init__(hass, deviceId, prodName, definition["productModel"], definition, parent)
         self.setLimits(-900, 800)
         self.maxSolar = -900
-        self.acSwitch = ZendureSwitch(self, "acSwitch", self.entityWrite, None, "switch",1)
+        self.acSwitch = ZendureSwitch(self, "acSwitch", self.entityWrite, None, "switch", 1)
         self.dcSwitch = ZendureSelect(self, "dcSwitch", {0: "off", 1: "on"}, self.entityWrite, 1)
 
     async def charge(self, power: int) -> int:
-        _LOGGER.info(f"Power charge {self.name} => {power}")
+        _LOGGER.info("Power charge %s => %s", self.name, power)
         self.mqttInvoke(
             {
                 "arguments": [
@@ -44,7 +44,7 @@ class SuperBaseV6400(ZendureLegacy):
         return power
 
     async def discharge(self, power: int) -> int:
-        _LOGGER.info(f"Power discharge {self.name} => {power}")
+        _LOGGER.info("Power discharge %s => %s", self.name, power)
         self.mqttInvoke(
             {
                 "arguments": [

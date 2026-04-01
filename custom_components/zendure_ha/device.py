@@ -179,7 +179,7 @@ class ZendureDevice(EntityDevice):
             self.discharge_start = discharge // 10
             self.limitOutput.update_range(0, discharge)
         except Exception:
-            _LOGGER.error(f"SetLimits error {self.name} {charge} {discharge}!")
+            _LOGGER.error("SetLimits error %s %s %s!", self.name, charge, discharge)
 
     def setStatus(self) -> None:
         try:
@@ -193,7 +193,7 @@ class ZendureDevice(EntityDevice):
                 self.connectionStatus.update_value(3)
             elif self.connection.value == SmartMode.ZENSDK:
                 self.connectionStatus.update_value(12)
-            elif self.mqtt is not None and self.mqtt.host == self.api.localServer:
+            elif self.mqtt is not None and self.mqtt.host == self.api.local_server:
                 self.connectionStatus.update_value(11)
             else:
                 self.connectionStatus.update_value(10)
@@ -243,7 +243,7 @@ class ZendureDevice(EntityDevice):
                             self.nextCalibration.update_value(dt_util.now() + timedelta(days=30))
                         self.availableKwh.update_value((self.electricLevel.asNumber - self.minSoc.asNumber) / 100 * self.kWh)
         except Exception as e:
-            _LOGGER.error(f"EntityUpdate error {self.name} {key} {e}!")
+            _LOGGER.error("EntityUpdate error %s %s %s!", self.name, key, e)
             _LOGGER.error(traceback.format_exc())
 
         return changed
@@ -265,10 +265,10 @@ class ZendureDevice(EntityDevice):
 
     async def entityWrite(self, entity: EntityZendure, value: Any) -> None:
         if entity.translation_key is None:
-            _LOGGER.error(f"Entity {entity.name} has no translation_key, cannot write property {self.name}")
+            _LOGGER.error("Entity %s has no translation_key, cannot write property", entity.name)
             return
 
-        _LOGGER.info(f"Writing property {self.name} {entity.propertyName} => {value}")
+        _LOGGER.info("Writing property %s %s => %s", self.name, entity.propertyName, value)
         self._messageid += 1
         payload = json.dumps(
             {
@@ -342,7 +342,7 @@ class ZendureDevice(EntityDevice):
                     # self.mqttProperties(payload)
 
                 case "register/replay":
-                    _LOGGER.info(f"Register replay for {self.name} => {payload}")
+                    _LOGGER.info("Register replay for %s => %s", self.name, payload)
                     if self.mqtt is not None:
                         self.mqtt.publish(f"iot/{self.prodkey}/{self.deviceId}/register/replay", None, 1, True)
 
@@ -374,11 +374,11 @@ class ZendureDevice(EntityDevice):
         self.mqtt = None
         if self.lastseen != datetime.min:
             if self.connection.value == 0:
-                await self.bleMqtt(self.api.mqttCloud)
+                await self.bleMqtt(self.api.mqtt_cloud)
             elif self.connection.value == 1:
-                await self.bleMqtt(self.api.mqttLocal)
+                await self.bleMqtt(self.api.mqtt_local)
 
-        _LOGGER.debug(f"Mqtt selected {self.name}")
+        _LOGGER.debug("Mqtt selected %s", self.name)
 
     @property
     def bleMac(self) -> str | None:
@@ -437,7 +437,7 @@ class ZendureDevice(EntityDevice):
                     if source := self._scanner_source(scanner_device):
                         sources.add(source)
         except Exception as err:
-            _LOGGER.debug(f"Could not read bluetooth scanner sources for {self.name}: {err}")
+            _LOGGER.debug("Could not read bluetooth scanner sources for %s: %s", self.name, err)
 
         # Fallback: derive sources from all discovered connectable advertisements.
         try:
@@ -446,7 +446,7 @@ class ZendureDevice(EntityDevice):
                     if source := getattr(info, "source", None):
                         sources.add(str(source))
         except Exception as err:
-            _LOGGER.debug(f"Could not derive bluetooth sources for {self.name}: {err}")
+            _LOGGER.debug("Could not derive bluetooth sources for %s: %s", self.name, err)
 
         return sorted(sources)
 
@@ -460,7 +460,7 @@ class ZendureDevice(EntityDevice):
                     if device := self._scanner_ble_device(scanner_device):
                         return device
             except Exception as err:
-                _LOGGER.debug(f"Could not get BLE device for {self.name} on source {source}: {err}")
+                _LOGGER.debug("Could not get BLE device for %s on source %s: %s", self.name, source, err)
 
         return None
 
@@ -484,7 +484,7 @@ class ZendureDevice(EntityDevice):
         """Set the MQTT server for the device via BLE."""
         msg: str | None = None
         try:
-            if self.api.wifipsw == "" or self.api.wifissid == "":
+            if self.api.wifi_psw == "" or self.api.wifi_ssid == "":
                 msg = "No WiFi credentials or connections found"
                 return False
 
@@ -502,13 +502,11 @@ class ZendureDevice(EntityDevice):
                 device = bluetooth.async_ble_device_from_address(self.hass, ble_mac, True)
 
             if device is None:
-                msg = f"BLE device {ble_mac} not found"
-                if ble_source is not None:
-                    msg += f" on source {ble_source}"
+                _LOGGER.warning("BLE device %s not found%s", ble_mac, f" on source {ble_source}" if ble_source else "")
                 return False
 
             try:
-                _LOGGER.info(f"Set mqtt {self.name} to {mqtt.host}")
+                _LOGGER.info("Set mqtt %s to %s", self.name, mqtt.host)
                 if establish_connection is not None:
                     client = await establish_connection(BleakClient, device, self.name)
                 else:
@@ -522,8 +520,8 @@ class ZendureDevice(EntityDevice):
                             "iotUrl": mqtt.host,
                             "messageId": 1002,
                             "method": "token",
-                            "password": self.api.wifipsw,
-                            "ssid": self.api.wifissid,
+                            "password": self.api.wifi_psw,
+                            "ssid": self.api.wifi_ssid,
                             "timeZone": "GMT+01:00",
                             "token": "abcdefgh",
                         },
@@ -541,14 +539,11 @@ class ZendureDevice(EntityDevice):
                     if client.is_connected:
                         await client.disconnect()
             except TimeoutError:
-                msg = "Timeout when trying to connect to the BLE device"
-                _LOGGER.warning(msg)
+                _LOGGER.warning("Timeout when trying to connect to the BLE device")
             except (AttributeError, BleakError) as err:
-                msg = f"Could not connect to {self.name}: {err}"
-                _LOGGER.warning(msg)
+                _LOGGER.warning("Could not connect to %s: %s", self.name, err)
             except Exception as err:
-                msg = f"BLE error: {err}"
-                _LOGGER.warning(msg)
+                _LOGGER.warning("BLE error: %s", err)
             else:
                 self.mqtt = mqtt
                 if self.zendure is not None:
@@ -578,10 +573,10 @@ class ZendureDevice(EntityDevice):
             payload = json.dumps(command, default=lambda o: o.__dict__)
             b = bytearray()
             b.extend(map(ord, payload))
-            _LOGGER.info(f"BLE command: {self.name} => {payload}")
+            _LOGGER.info("BLE command: %s => %s", self.name, payload)
             await client.write_gatt_char(SF_COMMAND_CHAR, b, response=False)
         except Exception as err:
-            _LOGGER.warning(f"BLE error: {err}")
+            _LOGGER.warning("BLE error: %s", err)
 
     async def power_get(self) -> bool:
         if self.lastseen < datetime.now():
@@ -609,7 +604,7 @@ class ZendureDevice(EntityDevice):
         """Set charge power."""
         power = min(0, max(power, self.charge_limit))
         if abs(power - self.homeInput.asInt + self.homeOutput.asInt) <= SmartMode.POWER_TOLERANCE:
-            _LOGGER.info(f"Power charge {self.name} => no action [power {power}]")
+            _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
             return self.homeInput.asInt
         return await self.charge(power)
 
@@ -621,7 +616,7 @@ class ZendureDevice(EntityDevice):
         """Set discharge power."""
         power = max(0, min(power, self.discharge_limit))
         if abs(power - self.homeOutput.asInt + self.homeInput.asInt) <= SmartMode.POWER_TOLERANCE:
-            _LOGGER.info(f"Power discharge {self.name} => no action [power {power}]")
+            _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)
             return self.homeOutput.asInt
         return await self.discharge(power)
 
@@ -657,20 +652,20 @@ class ZendureLegacy(ZendureDevice):
     async def button_press(self, button: ZendureButton) -> None:
         match button.translation_key:
             case "mqtt_reset":
-                _LOGGER.info(f"Resetting MQTT for {self.name}")
-                await self.bleMqtt(self.api.mqttCloud if self.connection.value == 0 else self.api.mqttLocal)
+                _LOGGER.info("Resetting MQTT for %s", self.name)
+                await self.bleMqtt(self.api.mqtt_cloud if self.connection.value == 0 else self.api.mqtt_local)
 
     async def dataRefresh(self, _update_count: int) -> None:
         """Refresh the device data."""
         if self.lastseen != datetime.min:
             self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.mqtt)
         else:
-            self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.api.mqttCloud)
-            self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.api.mqttLocal)
+            self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.api.mqtt_cloud)
+            self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.api.mqtt_local)
 
     def mqttMessage(self, topic: str, payload: Any) -> bool:
         if topic == "register/replay":
-            _LOGGER.info(f"Register replay for {self.name} => {payload}")
+            _LOGGER.info("Register replay for %s => %s", self.name, payload)
             return True
 
         return super().mqttMessage(topic, payload)
@@ -690,24 +685,24 @@ class ZendureZenSdk(ZendureDevice):
         self.mqtt = None
         match select.value:
             case 0:
-                self.api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
-                self.api.mqttCloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
+                self.api.mqtt_cloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
+                self.api.mqtt_cloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
 
             case 2:
-                self.api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
-                self.api.mqttCloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
+                self.api.mqtt_cloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
+                self.api.mqtt_cloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
 
-        _LOGGER.debug(f"Mqtt selected {self.name}")
+        _LOGGER.debug("Mqtt selected %s", self.name)
 
     async def entityWrite(self, entity: EntityZendure, value: Any) -> None:
         if entity.translation_key is None:
-            _LOGGER.error(f"Entity {entity.name} has no translation_key, cannot write property {self.name}")
+            _LOGGER.error("Entity %s has no translation_key, cannot write property", entity.name)
             return
 
         if self.online and self.connection.value == 0:
             await super().entityWrite(entity, value)
         else:
-            _LOGGER.info(f"Writing property {self.name} {entity.propertyName} => {value}")
+            _LOGGER.info("Writing property %s %s => %s", self.name, entity.propertyName, value)
             await self.httpPost("properties/write", {"properties": {entity.propertyName: value}})
 
     async def dataRefresh(self, update_count: int) -> None:
@@ -725,12 +720,12 @@ class ZendureZenSdk(ZendureDevice):
 
     async def charge(self, power: int, _off: bool = False) -> int:
         """Set charge power."""
-        _LOGGER.info(f"Power charge {self.name} => {power}")
+        _LOGGER.info("Power charge %s => %s", self.name, power)
         await self.doCommand({"properties": {"smartMode": 0 if power == 0 else 1, "acMode": 1, "outputLimit": 0, "inputLimit": -power}})
         return power
 
     async def discharge(self, power: int) -> int:
-        _LOGGER.info(f"Power discharge {self.name} => {power}")
+        _LOGGER.info("Power discharge %s => %s", self.name, power)
         await self.doCommand({"properties": {"smartMode": 0 if power == 0 else 1, "acMode": 2, "outputLimit": power, "inputLimit": 0}})
         return power
 
@@ -752,7 +747,7 @@ class ZendureZenSdk(ZendureDevice):
             self.lastseen = datetime.now()
             return payload if key is None else payload.get(key, {})
         except Exception as e:
-            _LOGGER.error(f"{type(e).__name__} for {self.name} during httpGet{f': {e}' if str(e) else '!'}")
+            _LOGGER.error("%s for %s during httpGet: %s", type(e).__name__, self.name, e)
             self.lastseen = datetime.min
         return {}
 
@@ -764,7 +759,7 @@ class ZendureZenSdk(ZendureDevice):
             url = f"http://{self.ipAddress}/{url}"
             await self.session.post(url, json=command, headers=CONST_HEADER, timeout=CONST_TIMEOUT)
         except Exception as e:
-            _LOGGER.error(f"{type(e).__name__} for {self.name} during httpPost{f': {e}' if str(e) else '!'}")
+            _LOGGER.error("%s for %s during httpPost: %s", type(e).__name__, self.name, e)
             self.lastseen = datetime.min
             return False
         return True

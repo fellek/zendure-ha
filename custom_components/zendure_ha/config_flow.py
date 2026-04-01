@@ -77,8 +77,9 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
             self._user_input = user_input
 
             try:
-                if await ZendureApi.Connect(self.hass, self._user_input, False) is None:
-                    errors["base"] = "invalid input"
+                # ✅ NEU: Ruft direkt api_ha auf (ohne Storage-Logik, die hier nicht hin gehört)
+                if await ZendureApi.api_ha(self.hass, self._user_input) is None:
+                    errors["base"] = "invalid_token"
                 else:
                     localmqtt = user_input[CONF_MQTTLOCAL]
                     if localmqtt:
@@ -88,9 +89,14 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._abort_if_unique_id_configured()
                     return self.async_create_entry(title="Zendure", data=self._user_input)
 
+            # ✅ NEU: Spezielle HA-Errors abfangen (z.B. falsches Base64 Format)
+            except HomeAssistantError as err:
+                _LOGGER.error("Token validation failed: %s", err)
+                errors["base"] = "invalid_token"
+            # ✅ NEU: Alle anderen Fehler (Timeout, Server down) als "cannot_connect"
             except Exception as err:  # pylint: disable=broad-except
-                errors["base"] = f"invalid input {err}"
-
+                _LOGGER.error("Unexpected exception during setup: %s", err)
+                errors["base"] = "cannot_connect"
         return self.async_show_form(step_id="user", data_schema=self.data_schema, errors=errors)
 
     async def async_step_local(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -98,9 +104,10 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None and user_input.get(CONF_MQTTSERVER, None) is not None:
             try:
                 self._user_input = self._user_input | user_input if self._user_input else user_input
-                if await ZendureApi.Connect(self.hass, self._user_input, False) is None:
+                if await ZendureApi.api_ha(self.hass, self._user_input) is None:
                     errors["base"] = "invalid input"
             except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.error("Unexpected exception in local step: %s", err)
                 errors["base"] = f"invalid input {err}"
             else:
                 await self.async_set_unique_id("Zendure", raise_on_progress=False)
@@ -114,30 +121,79 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         entry = self._get_reconfigure_entry()
-        schema = self.data_schema
-        if user_input is not None:
-            self._user_input = self._user_input | user_input
-            use_mqtt = user_input.get(CONF_MQTTLOCAL, False)
-            if use_mqtt:
-                schema = self.mqtt_schema
-            else:
-                try:
-                    if await ZendureApi.Connect(self.hass, self._user_input, False) is None:
-                        errors["base"] = "invalid input"
-                except Exception as err:  # pylint: disable=broad-except
-                    _LOGGER.error(f"Unexpected exception: {err}")
-                    errors["base"] = f"invalid input {err}"
-                else:
-                    await self.async_set_unique_id("Zendure", raise_on_progress=False)
-                    self._abort_if_unique_id_mismatch()
 
-                    return self.async_update_reload_and_abort(entry, data=self._user_input)
+        # Wenn noch keine User-Eingabe da ist, zeige das Haupt-Formular
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=self.add_suggested_values_to_schema(
+                    data_schema=self.data_schema,
+                    suggested_values=entry.data,
+                ),
+                errors=errors,
+            )
 
+        # ✅ NEU: Erste Eingabe ist da. Merge mit alten Daten.
+        self._user_input = entry.data | user_input
+        use_mqtt = user_input.get(CONF_MQTTLOCAL, entry.data.get(CONF_MQTTLOCAL, False))
+
+        # Wenn Local MQTT angehakt wurde, aber noch keine Server-Daten eingegeben wurden ->
+        # Sende den Nutzer zum MQTT Formular (Genau wie bei async_step_user!)
+        if use_mqtt and CONF_MQTTSERVER not in user_input:
+            return await self.async_step_reconfigure_local()
+
+        # Wenn wir hier sind, hat der Nutzer alles eingegeben (oder MQTT ist deaktiviert).
+        # Wir validieren die Daten.
+        try:
+            if await ZendureApi.api_ha(self.hass, self._user_input) is None:
+                errors["base"] = "invalid_token"
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.error("Unexpected exception during reconfigure: %s", err)
+            errors["base"] = "cannot_connect"
+        else:
+            await self.async_set_unique_id("Zendure", raise_on_progress=False)
+            self._abort_if_unique_id_mismatch()
+            return self.async_update_reload_and_abort(entry, data=self._user_input)
+
+        # Im Fehlerfall zeige das Haupt-Formular wieder an
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
-                data_schema=schema,
-                suggested_values=entry.data | (user_input or {}),
+                data_schema=self.data_schema,
+                suggested_values=entry.data | user_input,
+            ),
+            errors=errors,
+        )
+    @staticmethod
+    @callback
+    def async_get_options_flow(_config_entry: ZendureConfigEntry) -> ZendureOptionsFlowHandler:
+        """Get the options flow for this handler."""
+        return ZendureOptionsFlowHandler()
+
+    async def async_step_reconfigure_local(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Handle the reconfigure step for local MQTT settings."""
+        errors: dict[str, str] = {}
+        entry = self._get_reconfigure_entry()
+
+        if user_input is not None:
+            self._user_input = self._user_input | user_input
+
+            try:
+                if await ZendureApi.api_ha(self.hass, self._user_input) is None:
+                    errors["base"] = "invalid_token"
+            except Exception as err:
+                _LOGGER.error("Unexpected exception during local reconfigure: %s", err)
+                errors["base"] = "cannot_connect"
+            else:
+                await self.async_set_unique_id("Zendure", raise_on_progress=False)
+                self._abort_if_unique_id_mismatch()
+                return self.async_update_reload_and_abort(entry, data=self._user_input)
+
+        return self.async_show_form(
+            step_id="reconfigure_local",
+            data_schema=self.add_suggested_values_to_schema(
+                data_schema=self.mqtt_schema,
+                suggested_values=entry.data,
             ),
             errors=errors,
         )
@@ -147,7 +203,6 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(_config_entry: ZendureConfigEntry) -> ZendureOptionsFlowHandler:
         """Get the options flow for this handler."""
         return ZendureOptionsFlowHandler()
-
 
 class ZendureOptionsFlowHandler(OptionsFlow):
     """Handles the options flow."""

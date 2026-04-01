@@ -1,4 +1,4 @@
-"""Interfaces with the Zendure Integration binairy sensors."""
+"""Interfaces with the Zendure Integration binary sensors."""
 
 import logging
 from typing import Any
@@ -47,6 +47,6 @@ class ZendureBinarySensor(EntityZendure, BinarySensorEntity):
             if self.hass and self.hass.loop.is_running():
                 self.schedule_update_ha_state()
         except Exception as err:
-            _LOGGER.error(f"Error {err} setting state: {self._attr_unique_id} => {value}")
+            _LOGGER.error("Error %s setting state: %s => %s", err, self._attr_unique_id, value)
 
         return True
