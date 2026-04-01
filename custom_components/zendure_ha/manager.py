@@ -528,57 +528,77 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # stop discharging devices
         for d in self.discharge:
             # avoid gridOff device to use power from the grid
-            await d.power_discharge(0 if d.pwr_offgrid == 0 else -10)
+            await d.power_charge(0 if d.pwr_offgrid == 0 else -SmartMode.POWER_IDLE_OFFSET)
 
         # prevent hysteria
         if self.charge_time > time:
             if self.charge_time == datetime.max:
-                self.charge_time = time + timedelta(seconds=2 if (time - self.charge_last).total_seconds() > 300 else 60)
+                self.charge_time = time + timedelta(
+                    seconds=SmartMode.HYSTERESIS_FAST_COOLDOWN
+                    if (time - self.charge_last).total_seconds() > SmartMode.HYSTERESIS_LONG_COOLDOWN
+                    else SmartMode.HYSTERESIS_SLOW_COOLDOWN
+                )
                 self.charge_last = self.charge_time
                 self.pwr_low = 0
             setpoint = 0
         self.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
 
-        # distribute charging devices
-        dev_start = min(0, setpoint - self.charge_optimal * 2) if setpoint < -SmartMode.POWER_START else 0
+        # Cap setpoint to the maximum possible charge limit of all devices
+        # setpoint ist negativ (z.B. -2000W), charge_limit ist ebenfalls negativ (z.B. -3600W)
         limit = self.charge_limit
-        setpoint = max(limit, setpoint)
+        setpoint = max(setpoint, limit)
+
+        # Check if we need to wake up idle devices
+        dev_start = min(0, setpoint - self.charge_optimal * SmartMode.WAKEUP_CAPACITY_FACTOR) if setpoint < -SmartMode.POWER_START else 0
+        remaining_setpoint = setpoint
+
         for i, d in enumerate(sorted(self.charge, key=lambda d: d.electricLevel.asInt, reverse=True)):
             # Weight per device: pwr_max * remaining capacity (100 - SOC%).
-            # Devices with lower SOC get a larger share of the charge power.
-            # Guard against division by zero: charge_weight can be 0 when all
-            # remaining devices are at 100% SOC (nothing left to charge) or when
-            # it drops to 0 mid-iteration after subtracting previous devices.
             device_weight = d.pwr_max * (100 - d.electricLevel.asInt)
+
             if self.charge_weight != 0:
-                pwr = int(setpoint * device_weight / self.charge_weight)
+                pwr = int(remaining_setpoint * device_weight / self.charge_weight)
             else:
-                # all remaining devices at 100% SOC — skip charging
                 pwr = 0
             self.charge_weight -= device_weight
 
-            # adjust the limit, make sure we have 'enough' power to charge
-            limit -= d.pwr_max
-            pwr = max(pwr, setpoint, d.pwr_max)
-            if limit > setpoint - pwr:
-                pwr = max(setpoint - limit, setpoint, d.pwr_max)
+            # Clamp 1: Device kann nicht schneller laden als seine Hardware erlaubt (-d.pwr_max)
+            pwr = max(pwr, -d.pwr_max)
 
-            # make sure we have devices in optimal working range
+            # Clamp 2: Device kann nicht mehr verbrauchen, als vom Gesamt-Setpoint übrig ist
+            pwr = max(pwr, remaining_setpoint)
+
+            # Hysteresis logic for the first device in a multi-device setup
             if len(self.charge) > 1 and i == 0:
-                self.pwr_low = 0 if (delta := d.charge_start * 1.5 - pwr) >= 0 else self.pwr_low + int(-delta)
-                pwr = 0 if self.pwr_low < d.charge_optimal else pwr
+                # WICHTIG (device.py Kontext): charge_start und charge_optimal
+                # sind in device.py NEGATIV (z.B. -80W), da charge_limit negativ ist.
+                # Für die Hysterese-Berechnung benötigen wir jedoch absolute positive Werte!
+                abs_start = abs(d.charge_start)
+                abs_optimal = abs(d.charge_optimal)
+                abs_pwr = abs(pwr)
 
-            setpoint -= await d.power_charge(pwr)
-            dev_start += -1 if pwr != 0 and d.electricLevel.asInt > self.idle_lvlmin + 3 else 0
+                delta = abs_start * SmartMode.HYSTERESIS_START_FACTOR - abs_pwr
+                if delta >= 0:
+                    self.pwr_low = 0
+                else:
+                    self.pwr_low += int(-delta)
+
+                # Wenn die aufsummierte "Unterversorgung" den optimalen Bereich überschreitet,
+                # Gerät pausieren, damit sich Leistung stauen kann.
+                if self.pwr_low > abs_optimal:
+                    pwr = 0
+
+            actual_pwr = await d.power_charge(pwr)
+            remaining_setpoint -= actual_pwr
+            dev_start += -1 if pwr != 0 and d.electricLevel.asInt > self.idle_lvlmin + SmartMode.SOC_IDLE_BUFFER else 0
 
         # start idle device if needed
         if dev_start < 0 and len(self.idle) > 0:
             self.idle.sort(key=lambda d: d.electricLevel.asInt, reverse=False)
             for d in self.idle:
-                # offGrid device need to be started with at least their offgrid power, otherwise they will not be recognized as charging
-                # but should not be started with more than pwr_offgrid if they are full
-                # if a offGrid device need to be started, the output power is set to 0 and it take all offGrid power from grid
-                await d.power_charge(-SmartMode.POWER_START - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid))
+                await d.power_charge(
+                    -SmartMode.POWER_START - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0,
+                                                                                                               d.pwr_offgrid))
                 if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
                     break
             self.pwr_low = 0
@@ -586,7 +606,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     async def power_discharge(self, setpoint: int) -> None:
         """Discharge devices."""
         _LOGGER.info("Discharge => setpoint %sW", setpoint)
-        self.operationstate.update_value(ManagerState.DISCHARGE.value if setpoint > 0 and self.discharge else ManagerState.IDLE.value)
+        self.operationstate.update_value(
+            ManagerState.DISCHARGE.value if setpoint > 0 and self.discharge else ManagerState.IDLE.value)
 
         # reset hysteria time
         if self.charge_time != datetime.max:
@@ -595,45 +616,56 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # stop charging devices
         for d in self.charge:
-            # SF 2400 may show more gridInputPower than offGridPower and will be recognized as charging, so set power to 10 instead of 0
-            await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 else 10)
+            # SF 2400 Quirk: 0W würde den Inverter schlafen legen, daher POWER_IDLE_OFFSET
+            await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 else SmartMode.POWER_IDLE_OFFSET)
 
-        # distribute discharging devices, use produced power first, before adding another device
-        dev_start = max(0, setpoint - self.discharge_optimal * 2 - self.discharge_produced) if setpoint > SmartMode.POWER_START else 0
+        # Determine if we only need to pass through solar power
         solaronly = self.discharge_produced >= setpoint
         limit = self.discharge_produced if solaronly else self.discharge_limit
-        setpoint = min(limit, setpoint)
+
+        # Cap setpoint to available limit
+        setpoint = min(setpoint, limit)
+
+        dev_start = max(0,
+                        setpoint - self.discharge_optimal * SmartMode.WAKEUP_CAPACITY_FACTOR - self.discharge_produced) if setpoint > SmartMode.POWER_START else 0
+        remaining_setpoint = setpoint
+
         for i, d in enumerate(sorted(self.discharge, key=lambda d: d.electricLevel.asInt, reverse=False)):
-            # Weight per device: pwr_max * SOC%. Devices with higher SOC get a
-            # larger share of the discharge power.
-            # Guard against division by zero: discharge_weight can be 0 when all
-            # remaining devices are at 0% SOC, or when it drops to 0 mid-iteration.
-            # In that case, distribute the remaining setpoint evenly across the
-            # remaining devices so they can still pass through solar production.
+            # Weight per device: pwr_max * SOC%.
             device_weight = d.pwr_max * d.electricLevel.asInt
+
             if self.discharge_weight != 0:
-                pwr = int(setpoint * device_weight / self.discharge_weight)
+                pwr = int(remaining_setpoint * device_weight / self.discharge_weight)
             elif len(self.discharge) > i:
-                pwr = int(setpoint / (len(self.discharge) - i))
+                pwr = int(remaining_setpoint / (len(self.discharge) - i))
             else:
                 pwr = 0
+
             # SOCFULL devices should only pass through solar, not drain battery
             if pwr < -d.pwr_produced and d.state == DeviceState.SOCFULL:
                 pwr = -d.pwr_produced
+
             self.discharge_weight -= device_weight
 
-            # adjust the limit, make sure we have 'enough' power to discharge
-            limit -= -d.pwr_produced if solaronly else d.pwr_max
-            if limit < setpoint - pwr:
-                pwr = max(setpoint - limit, 0 if d.state != DeviceState.SOCFULL else -d.pwr_produced)
-            pwr = min(pwr, setpoint, d.pwr_max)
+            # Clamp 1: Device cannot discharge faster than its hardware limit
+            pwr = min(pwr, d.pwr_max)
 
-            # make sure we have devices in optimal working range
+            # Clamp 2: Device cannot discharge more than what is left of the setpoint
+            pwr = min(pwr, remaining_setpoint)
+
+            # Hysteresis logic for the first device in a multi-device setup
             if len(self.discharge) > 1 and i == 0 and d.state != DeviceState.SOCFULL:
-                self.pwr_low = 0 if (delta := d.discharge_start * 1.5 - pwr) <= 0 else self.pwr_low + int(delta)
-                pwr = 0 if self.pwr_low > d.discharge_optimal else pwr
+                delta = d.discharge_start * SmartMode.HYSTERESIS_START_FACTOR - pwr
+                if delta <= 0:
+                    self.pwr_low = 0
+                else:
+                    self.pwr_low += int(delta)
 
-            setpoint -= await d.power_discharge(pwr)
+                if self.pwr_low > d.discharge_optimal:
+                    pwr = 0
+
+            actual_pwr = await d.power_discharge(pwr)
+            remaining_setpoint -= actual_pwr
             dev_start += 1 if pwr != 0 and d.electricLevel.asInt + 3 < self.idle_lvlmax else 0
 
         # start idle device if needed
