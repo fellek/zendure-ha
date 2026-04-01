@@ -371,6 +371,11 @@ class ZendureDevice(EntityDevice):
         return True
 
     async def mqttSelect(self, _select: ZendureRestoreSelect, _value: Any) -> None:
+        # During restore, api is not yet assigned — skip until loadDevices() completes
+        if not hasattr(self, "api"):
+            _LOGGER.debug("mqttSelect %s skipped: api not yet initialized (restore)", self.name)
+            return
+
         self.mqtt = None
         if self.lastseen != datetime.min:
             if self.connection.value == 0:
@@ -682,6 +687,11 @@ class ZendureZenSdk(ZendureDevice):
         self.httpid = 0
 
     async def mqttSelect(self, select: Any, _value: Any) -> None:
+        # During restore, api is not yet assigned — skip until loadDevices() completes
+        if not hasattr(self, "api"):
+            _LOGGER.debug("mqttSelect %s skipped: api not yet initialized (restore)", self.name)
+            return
+
         self.mqtt = None
         match select.value:
             case 0:
