@@ -2,28 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import ClientTimeout
-from bleak import BleakClient
-from bleak.exc import BleakError
-
-try:
-    from bleak_retry_connector import establish_connection
-except ImportError:
-    establish_connection = None
-
-from homeassistant.components import bluetooth, persistent_notification
+from homeassistant.components import persistent_notification
 from homeassistant.components.number import NumberMode
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.util import dt as dt_util
+
 from paho.mqtt import client as mqtt_client
 
 from .binary_sensor import ZendureBinarySensor
@@ -33,6 +22,10 @@ from .entity import EntityDevice, EntityZendure
 from .number import ZendureNumber
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureRestoreSensor, ZendureSensor
+from . import ble as ble_transport
+from . import mqtt_protocol
+from .battery import ZendureBattery
+from .power_port import DcSolarPowerPort, OffGridPowerPort
 
 if TYPE_CHECKING:
     from .api import ZendureApi
@@ -41,49 +34,6 @@ _LOGGER = logging.getLogger(__name__)
 
 CONST_HEADER = {"content-type": "application/json; charset=UTF-8"}
 CONST_TIMEOUT = ClientTimeout(total=4)
-SF_COMMAND_CHAR = "0000c304-0000-1000-8000-00805f9b34fb"
-
-
-class ZendureBattery(EntityDevice):
-    """Zendure Battery class for devices."""
-
-    def __init__(self, hass: HomeAssistant, sn: str, parent: EntityDevice) -> None:
-        """Initialize Device."""
-        self.kWh = 0.0
-        model = "???"
-        match sn[0]:
-            case "A":
-                if sn[3] == "3":
-                    model = "AIO2400"
-                    self.kWh = 2.4
-                else:
-                    model = "AB1000"
-                    self.kWh = 0.96
-            case "B":
-                model = "AB1000S"
-                self.kWh = 0.96
-            case "C":
-                # CO4A => internal battery of SF800+/SF1600AC+
-                model = "I1920" if sn[1:4] == "O4A" else "AB2000" + ("S" if sn[3] == "F" else "X" if sn[3] == "E" else "")
-                self.kWh = 1.92
-            case "F":
-                model = "AB3000"
-                self.kWh = 2.88
-            case "G":
-                model = "AB3000L"
-                self.kWh = 2.88
-            case "J":
-                # JO2A => internal battery of SF2400AC pro
-                # JO4A => internal battery of SF2400AC+
-                model = "I2400"
-                self.kWh = 2.4
-            case _:
-                model = "Unknown"
-                self.kWh = 0.0
-
-        name = f"{model} {sn[-5:]}".strip()
-        super().__init__(hass, sn, name, model, "", sn, parent.deviceId)
-        self.attr_device_info["serial_number"] = sn
 
 
 class ZendureDevice(EntityDevice):
@@ -121,6 +71,9 @@ class ZendureDevice(EntityDevice):
         self.discharge_optimal: int = 0
         self.discharge_start: int = 0
         self.maxSolar = 0
+        self._has_offgrid = False
+        self.pv_port_count: int = 1  # <-- NEU: Standard ist 1 PV-Port
+        self.solar_inputs: list[ZendureSensor] = [] # <-- NEU: Speichert alle PV-Sensoren
         self.pwr_max: int = 0
         self.pwr_produced: int = 0
         self.actualKwh: float = 0.0
@@ -166,6 +119,26 @@ class ZendureDevice(EntityDevice):
         self.aggrSolar = ZendureRestoreSensor(self, "aggrSolar", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSwitchCount = ZendureRestoreSensor(self, "switchCount", None, None, None, "total_increasing", 0)
 
+    # NEU: Zentrale Initialisierung der Power Ports
+    def _init_power_ports(self) -> None:
+        """Initialisiert Ports NUR, wenn das Gerät diese auch physisch hat."""
+        self.solarPort: DcSolarPowerPort | None = None
+        self.offgridPort: OffGridPowerPort | None = None
+
+        # 1. DC Solar Port: Wird IGNORIERT, wenn pv_port_count == 0
+        if self.pv_port_count > 0 and self.maxSolar != 0:
+            solar_sensors = [self.solarInput] # Der Haupt-Sensor aus create_entities()
+            for i in range(2, self.pv_port_count + 1):
+                extra_sensor = ZendureSensor(self, f"solarInputPower_{i}", None, "W", "power", "measurement", icon="mdi:solar-panel")
+                solar_sensors.append(extra_sensor)
+            self.solarPort = DcSolarPowerPort(self, solar_sensors)
+
+        # 2. Offgrid Port: Wird IGNORIERT, wenn _has_offgrid == False
+        if self._has_offgrid:
+            self.offGrid = ZendureSensor(self, "gridOffPower", None, "W", "power", "measurement")
+            self.aggrOffGrid = ZendureRestoreSensor(self, "aggrGridOffPower", None, "kWh", "energy", "total_increasing", 2)
+            self.offgridPort = OffGridPowerPort(self)
+
     def setLimits(self, charge: int, discharge: int) -> None:
         """Set the device limits."""
         try:
@@ -201,51 +174,13 @@ class ZendureDevice(EntityDevice):
             self.connectionStatus.update_value(0)
 
     def entityUpdate(self, key: Any, value: Any) -> bool:
-        # update entity state
         if key in {"remainOutTime", "remainInputTime"}:
             self.remainingTime.update_value(self.calcRemainingTime())
             return True
 
         changed = super().entityUpdate(key, value)
-        try:
-            if changed:
-                match key:
-                    case "packState":
-                        if value == 0:
-                            self.aggrSwitchCount.update_value(1 + self.aggrSwitchCount.asNumber)
-                    case "outputPackPower":
-                        if not self.heatState.is_on:
-                            self.aggrCharge.aggregate(dt_util.now(), value)
-                        self.aggrDischarge.aggregate(dt_util.now(), 0)
-                        self.batInOut.update_value(self.batteryOutput.asInt - self.batteryInput.asInt)
-                    case "packInputPower":
-                        self.aggrCharge.aggregate(dt_util.now(), 0)
-                        self.aggrDischarge.aggregate(dt_util.now(), value)
-                        self.batInOut.update_value(self.batteryOutput.asInt - self.batteryInput.asInt)
-                    case "solarInputPower":
-                        self.aggrSolar.aggregate(dt_util.now(), value)
-                    case "gridInputPower":
-                        self.aggrHomeInput.aggregate(dt_util.now(), value)
-                    case "outputHomePower":
-                        self.aggrHomeOut.aggregate(dt_util.now(), value)
-                    case "gridOffPower":
-                        self.aggrOffGrid.aggregate(dt_util.now(), value)
-                    case "inverseMaxPower":
-                        self.setLimits(self.charge_limit, value)
-                    case "chargeLimit" | "chargeMaxLimit":
-                        self.setLimits(-value, self.discharge_limit)
-                    case "hemsState" | "socStatus":
-                        self.setStatus()
-                        if key == "socStatus" and self.socStatus.asInt == 0:
-                            self.nextCalibration.update_value(dt_util.now() + timedelta(days=30))
-                    case "electricLevel" | "minSoc" | "socLimit":
-                        if self.electricLevel.asInt == 100:
-                            self.nextCalibration.update_value(dt_util.now() + timedelta(days=30))
-                        self.availableKwh.update_value((self.electricLevel.asNumber - self.minSoc.asNumber) / 100 * self.kWh)
-        except Exception as e:
-            _LOGGER.error("EntityUpdate error %s %s %s!", self.name, key, e)
-            _LOGGER.error(traceback.format_exc())
-
+        if changed:
+            mqtt_protocol.entity_update_side_effects(self, key, value)
         return changed
 
     def calcRemainingTime(self) -> float:
@@ -264,111 +199,22 @@ class ZendureDevice(EntityDevice):
         return 0 if level <= soc else min(999, self.kWh * 10 / power * (level - soc))
 
     async def entityWrite(self, entity: EntityZendure, value: Any) -> None:
-        if entity.translation_key is None:
-            _LOGGER.error("Entity %s has no translation_key, cannot write property", entity.name)
-            return
-
-        _LOGGER.info("Writing property %s %s => %s", self.name, entity.propertyName, value)
-        self._messageid += 1
-        payload = json.dumps(
-            {
-                "deviceId": self.deviceId,
-                "messageId": self._messageid,
-                "timestamp": int(datetime.now().timestamp()),
-                "properties": {entity.propertyName: value},
-            },
-            default=lambda o: o.__dict__,
-        )
-        if self.mqtt is not None:
-            self.mqtt.publish(self.topic_write, payload)
+        await mqtt_protocol.mqtt_entity_write(self, entity, value)
 
     async def button_press(self, _key: str) -> None:
         return
 
     def mqttPublish(self, topic: str, command: Any, client: mqtt_client.Client | None = None) -> None:
-        command["messageId"] = self._messageid
-        command["deviceId"] = self.deviceId
-        command["timestamp"] = int(datetime.now().timestamp())
-        payload = json.dumps(command, default=lambda o: o.__dict__)
-
-        if client is not None:
-            client.publish(topic, payload)
-        elif self.mqtt is not None:
-            self.mqtt.publish(topic, payload)
+        mqtt_protocol.mqtt_publish(self, topic, command, client)
 
     def mqttInvoke(self, command: Any) -> None:
-        self._messageid += 1
-        command["messageId"] = self._messageid
-        command["deviceKey"] = self.deviceId
-        command["timestamp"] = int(datetime.now().timestamp())
-        self.mqttPublish(self.topic_function, command)
+        mqtt_protocol.mqtt_invoke(self, command)
 
     async def mqttProperties(self, payload: Any) -> None:
-        if self.lastseen == datetime.min:
-            self.lastseen = datetime.now() + timedelta(minutes=5)
-            self.setStatus()
-        else:
-            self.lastseen = datetime.now() + timedelta(minutes=5)
-
-        if (properties := payload.get("properties", None)) and len(properties) > 0:
-            for key, value in properties.items():
-                self.entityUpdate(key, value)
-
-        # update the battery properties
-        if batprops := payload.get("packData", None):
-            for b in batprops:
-                if (sn := b.get("sn", None)) is None:
-                    continue
-
-                if (bat := self.batteries.get(sn, None)) is None:
-                    self.batteries[sn] = ZendureBattery(self.hass, sn, self)
-
-                elif bat and b:
-                    for key, value in b.items():
-                        if key != "sn":
-                            bat.entityUpdate(key, value)
-
-            # Recalculate total capacity after every packData update
-            # (covers both new batteries and potential pack changes)
-            self.kWh = sum(0 if b is None else b.kWh for b in self.batteries.values())
-            self.totalKwh.update_value(self.kWh)
-            self.availableKwh.update_value((self.electricLevel.asNumber - self.minSoc.asNumber) / 100 * self.kWh)
+        await mqtt_protocol.mqtt_properties(self, payload)
 
     def mqttMessage(self, topic: str, payload: Any) -> bool:
-        try:
-            match topic:
-                case "properties/report":
-                    asyncio.run_coroutine_threadsafe(self.mqttProperties(payload), self.hass.loop)
-                    # self.mqttProperties(payload)
-
-                case "register/replay":
-                    _LOGGER.info("Register replay for %s => %s", self.name, payload)
-                    if self.mqtt is not None:
-                        self.mqtt.publish(f"iot/{self.prodkey}/{self.deviceId}/register/replay", None, 1, True)
-
-                case "time-sync":
-                    return True
-
-                case "properties/energy":
-                    self.hemsState.update_value(1)
-                    self.hemsStateUpdated = datetime.now()
-                    self.setStatus()
-                    return True
-
-                case "event/device" | "event/error":
-                    return True
-
-                case "properties/read" | "function/invoke/reply" | "properties/read/reply" | "config" | "log" | "function/invoke":
-                    return False
-
-                # case "firmware/report":
-                #     _LOGGER.info(f"Firmware report for {self.name} => {payload}")
-                case _:
-                    return False
-        except Exception as err:
-            _LOGGER.error(err)
-
-        return True
+        return mqtt_protocol.mqtt_message(self, topic, payload)
 
     async def mqttSelect(self, _select: ZendureRestoreSelect, _value: Any) -> None:
         # During restore, api is not yet assigned — skip until loadDevices() completes
@@ -387,201 +233,11 @@ class ZendureDevice(EntityDevice):
 
     @property
     def bleMac(self) -> str | None:
-        if (conn := self.attr_device_info.get("connections", None)) is not None:
-            for connection_type, mac_address in conn:
-                if connection_type == "bluetooth":
-                    return mac_address
-        return None
-
-    @staticmethod
-    def _scanner_source(scanner_device: Any) -> str | None:
-        """Extract scanner source identifier from a BluetoothScannerDevice-like object."""
-        source = getattr(scanner_device, "source", None)
-        if source:
-            return str(source)
-
-        if scanner := getattr(scanner_device, "scanner", None):
-            source = getattr(scanner, "source", None)
-            if source:
-                return str(source)
-
-        if service_info := getattr(scanner_device, "service_info", None):
-            source = getattr(service_info, "source", None)
-            if source:
-                return str(source)
-
-        return None
-
-    @staticmethod
-    def _scanner_ble_device(scanner_device: Any) -> Any | None:
-        """Extract BLEDevice from a BluetoothScannerDevice-like object."""
-        device = getattr(scanner_device, "ble_device", None)
-        if device is not None:
-            return device
-
-        device = getattr(scanner_device, "device", None)
-        if device is not None:
-            return device
-
-        if service_info := getattr(scanner_device, "service_info", None):
-            device = getattr(service_info, "device", None)
-            if device is not None:
-                return device
-
-        return None
-
-    def ble_sources(self) -> list[str]:
-        """Get available Bluetooth source identifiers from Home Assistant."""
-        sources: set[str] = set()
-        ble_mac = self.bleMac
-
-        # Prefer scanner sources for this specific device.
-        try:
-            if ble_mac and (scanner_devices_by_address := getattr(bluetooth, "async_scanner_devices_by_address", None)):
-                for scanner_device in scanner_devices_by_address(self.hass, ble_mac, True):
-                    if source := self._scanner_source(scanner_device):
-                        sources.add(source)
-        except Exception as err:
-            _LOGGER.debug("Could not read bluetooth scanner sources for %s: %s", self.name, err)
-
-        # Fallback: derive sources from all discovered connectable advertisements.
-        try:
-            if discovered_service_info := getattr(bluetooth, "async_discovered_service_info", None):
-                for info in discovered_service_info(self.hass, True):
-                    if source := getattr(info, "source", None):
-                        sources.add(str(source))
-        except Exception as err:
-            _LOGGER.debug("Could not derive bluetooth sources for %s: %s", self.name, err)
-
-        return sorted(sources)
-
-    def ble_device_from_source(self, ble_mac: str, source: str) -> Any | None:
-        """Return a BLEDevice for an address constrained to a specific scanner source."""
-        if scanner_devices_by_address := getattr(bluetooth, "async_scanner_devices_by_address", None):
-            try:
-                for scanner_device in scanner_devices_by_address(self.hass, ble_mac, True):
-                    if self._scanner_source(scanner_device) != source:
-                        continue
-                    if device := self._scanner_ble_device(scanner_device):
-                        return device
-            except Exception as err:
-                _LOGGER.debug("Could not get BLE device for %s on source %s: %s", self.name, source, err)
-
-        return None
-
-    def ble_adapter_options(self) -> dict[int, str]:
-        """Build selectable BLE adapter/source options for this device."""
-        options = {0: "auto"}
-        for idx, source in enumerate(self.ble_sources(), start=1):
-            options[idx] = source
-        return options
-
-    def selected_ble_source(self) -> str | None:
-        """Return configured BLE source for this device or None for auto selection."""
-        if self.bleAdapter is None:
-            return None
-
-        self.bleAdapter.setDict(self.ble_adapter_options())
-        source = self.bleAdapter.current_option
-        return None if source in (None, "", "auto") else str(source)
+        return ble_transport.ble_mac(self)
 
     async def bleMqtt(self, mqtt: mqtt_client.Client) -> bool:
         """Set the MQTT server for the device via BLE."""
-        msg: str | None = None
-        try:
-            if self.api.wifi_psw == "" or self.api.wifi_ssid == "":
-                msg = "No WiFi credentials or connections found"
-                return False
-
-            if (ble_mac := self.bleMac) is None:
-                msg = "No BLE MAC address available"
-                return False
-
-            # get the bluetooth device
-            ble_source = self.selected_ble_source()
-            device = None
-            if ble_source is not None:
-                device = self.ble_device_from_source(ble_mac, ble_source)
-
-            if device is None:
-                device = bluetooth.async_ble_device_from_address(self.hass, ble_mac, True)
-
-            if device is None:
-                _LOGGER.warning("BLE device %s not found%s", ble_mac, f" on source {ble_source}" if ble_source else "")
-                return False
-
-            try:
-                _LOGGER.info("Set mqtt %s to %s", self.name, mqtt.host)
-                if establish_connection is not None:
-                    client = await establish_connection(BleakClient, device, self.name)
-                else:
-                    client = BleakClient(device)
-                    await client.connect()
-
-                try:
-                    await self.bleCommand(
-                        client,
-                        {
-                            "iotUrl": mqtt.host,
-                            "messageId": 1002,
-                            "method": "token",
-                            "password": self.api.wifi_psw,
-                            "ssid": self.api.wifi_ssid,
-                            "timeZone": "GMT+01:00",
-                            "token": "abcdefgh",
-                        },
-                    )
-
-                    await self.bleCommand(
-                        client,
-                        {
-                            "messageId": 1003,
-                            "method": "station",
-                        },
-                    )
-                finally:
-                    # Ensure stale BLE sessions do not leak if command execution fails unexpectedly.
-                    if client.is_connected:
-                        await client.disconnect()
-            except TimeoutError:
-                _LOGGER.warning("Timeout when trying to connect to the BLE device")
-            except (AttributeError, BleakError) as err:
-                _LOGGER.warning("Could not connect to %s: %s", self.name, err)
-            except Exception as err:
-                _LOGGER.warning("BLE error: %s", err)
-            else:
-                self.mqtt = mqtt
-                if self.zendure is not None:
-                    self.zendure.loop_stop()
-                    self.zendure.disconnect()
-                    self.zendure = None
-
-                self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.mqtt)
-                self.setStatus()
-
-                return True
-            return False
-
-        finally:
-            if msg is not None:
-                msg = f"Error setting the MQTT server on {self.name} to {mqtt.host}, {msg}"
-            else:
-                msg = f"Changing the MQTT server on {self.name} to {mqtt.host} was successful"
-
-            persistent_notification.async_create(self.hass, (msg), "Zendure", "zendure_ha")
-
-            _LOGGER.info("BLE update ready")
-
-    async def bleCommand(self, client: BleakClient, command: Any) -> None:
-        try:
-            self._messageid += 1
-            payload = json.dumps(command, default=lambda o: o.__dict__)
-            b = bytearray()
-            b.extend(map(ord, payload))
-            _LOGGER.info("BLE command: %s => %s", self.name, payload)
-            await client.write_gatt_char(SF_COMMAND_CHAR, b, response=False)
-        except Exception as err:
-            _LOGGER.warning("BLE error: %s", err)
+        return await ble_transport.ble_mqtt(self, mqtt)
 
     async def power_get(self) -> bool:
         if self.lastseen < datetime.now():
@@ -635,8 +291,8 @@ class ZendureDevice(EntityDevice):
 
     @property
     def pwr_offgrid(self) -> int:
-        """Get the offgrid power."""
-        return 0
+        """Sicherer Zugriff auf Offgrid-Leistung (0 wenn nicht vorhanden)."""
+        return self.offGrid.asInt if self._has_offgrid else 0
 
 
 class ZendureLegacy(ZendureDevice):
@@ -647,12 +303,12 @@ class ZendureLegacy(ZendureDevice):
         super().__init__(hass, deviceId, name, model, definition, parent)
         self.connection = ZendureRestoreSelect(self, "connection", {0: "cloud", 1: "local"}, self.mqttSelect, 0)
         self.mqttReset = ZendureButton(self, "mqttReset", self.button_press)
-        self.bleAdapter = ZendureRestoreSelect(self, "bleAdapter", self.ble_adapter_options(), self.bleAdapterSelect, 0)
+        self.bleAdapter = ZendureRestoreSelect(self, "bleAdapter", ble_transport.ble_adapter_options(self), self.bleAdapterSelect, 0)
 
     async def bleAdapterSelect(self, _select: ZendureRestoreSelect, _value: Any) -> None:
         # Refresh available sources whenever selection changes or is restored.
         if self.bleAdapter is not None:
-            self.bleAdapter.setDict(self.ble_adapter_options())
+            self.bleAdapter.setDict(ble_transport.ble_adapter_options(self))
 
     async def button_press(self, button: ZendureButton) -> None:
         match button.translation_key:
@@ -676,103 +332,8 @@ class ZendureLegacy(ZendureDevice):
         return super().mqttMessage(topic, payload)
 
 
-class ZendureZenSdk(ZendureDevice):
-    """Zendure Zen SDK class for devices."""
-
-    def __init__(self, hass: HomeAssistant, deviceId: str, name: str, model: str, definition: dict[str, str], parent: str | None = None) -> None:
-        """Initialize Device."""
-        self.session = async_get_clientsession(hass, verify_ssl=False)
-        super().__init__(hass, deviceId, name, model, definition, parent)
-        self.connection = ZendureRestoreSelect(self, "connection", {0: "cloud", 2: "zenSDK"}, self.mqttSelect, 0)
-        self.httpid = 0
-
-    async def mqttSelect(self, select: Any, _value: Any) -> None:
-        # During restore, api is not yet assigned — skip until loadDevices() completes
-        if not hasattr(self, "api"):
-            _LOGGER.debug("mqttSelect %s skipped: api not yet initialized (restore)", self.name)
-            return
-
-        self.mqtt = None
-        match select.value:
-            case 0:
-                self.api.mqtt_cloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
-                self.api.mqtt_cloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
-
-            case 2:
-                self.api.mqtt_cloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
-                self.api.mqtt_cloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
-
-        _LOGGER.debug("Mqtt selected %s", self.name)
-
-    async def entityWrite(self, entity: EntityZendure, value: Any) -> None:
-        if entity.translation_key is None:
-            _LOGGER.error("Entity %s has no translation_key, cannot write property", entity.name)
-            return
-
-        if self.online and self.connection.value == 0:
-            await super().entityWrite(entity, value)
-        else:
-            _LOGGER.info("Writing property %s %s => %s", self.name, entity.propertyName, value)
-            await self.httpPost("properties/write", {"properties": {entity.propertyName: value}})
-
-    async def dataRefresh(self, update_count: int) -> None:
-        if update_count == 0 and not self.online:
-            json = await self.httpGet("properties/report")
-            await self.mqttProperties(json)
-
-    async def power_get(self) -> bool:
-        """Get the current power."""
-        if self.connection.value != 0:
-            json = await self.httpGet("properties/report")
-            await self.mqttProperties(json)
-
-        return await super().power_get()
-
-    async def charge(self, power: int, _off: bool = False) -> int:
-        """Set charge power."""
-        _LOGGER.info("Power charge %s => %s", self.name, power)
-        await self.doCommand({"properties": {"smartMode": 0 if power == 0 else 1, "acMode": 1, "outputLimit": 0, "inputLimit": -power}})
-        return power
-
-    async def discharge(self, power: int) -> int:
-        _LOGGER.info("Power discharge %s => %s", self.name, power)
-        await self.doCommand({"properties": {"smartMode": 0 if power == 0 else 1, "acMode": 2, "outputLimit": power, "inputLimit": 0}})
-        return power
-
-    async def power_off(self) -> None:
-        """Set the power off."""
-        await self.doCommand({"properties": {"smartMode": 0, "acMode": 2, "outputLimit": 0, "inputLimit": 0}})
-
-    async def doCommand(self, command: Any) -> None:
-        if self.connection.value != 0:
-            await self.httpPost("properties/write", command)
-        else:
-            self.mqttPublish(self.topic_write, command, self.mqtt)
-
-    async def httpGet(self, url: str, key: str | None = None) -> dict[str, Any]:
-        try:
-            url = f"http://{self.ipAddress}/{url}"
-            response = await self.session.get(url, headers=CONST_HEADER, timeout=CONST_TIMEOUT)
-            payload = json.loads(await response.text())
-            self.lastseen = datetime.now()
-            return payload if key is None else payload.get(key, {})
-        except Exception as e:
-            _LOGGER.error("%s for %s during httpGet: %s", type(e).__name__, self.name, e)
-            self.lastseen = datetime.min
-        return {}
-
-    async def httpPost(self, url: str, command: Any) -> bool:
-        try:
-            self.httpid += 1
-            command["id"] = self.httpid
-            command["sn"] = self.snNumber
-            url = f"http://{self.ipAddress}/{url}"
-            await self.session.post(url, json=command, headers=CONST_HEADER, timeout=CONST_TIMEOUT)
-        except Exception as e:
-            _LOGGER.error("%s for %s during httpPost: %s", type(e).__name__, self.name, e)
-            self.lastseen = datetime.min
-            return False
-        return True
+# Re-export for backward compatibility — canonical location: zendure_sdk.py
+from .zendure_sdk import ZendureZenSdk as ZendureZenSdk  # noqa: F401
 
 
 @dataclass

@@ -11,7 +11,7 @@ from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 
-from .api import ZendureApi
+from .api_auth import api_ha
 from .const import (
     CONF_APPTOKEN,
     CONF_AUTO_MQTT_USER,
@@ -78,7 +78,7 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
 
             try:
                 # ✅ NEU: Ruft direkt api_ha auf (ohne Storage-Logik, die hier nicht hin gehört)
-                if await ZendureApi.api_ha(self.hass, self._user_input) is None:
+                if await api_ha(self.hass, self._user_input) is None:
                     errors["base"] = "invalid_token"
                 else:
                     localmqtt = user_input[CONF_MQTTLOCAL]
@@ -104,7 +104,7 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None and user_input.get(CONF_MQTTSERVER, None) is not None:
             try:
                 self._user_input = self._user_input | user_input if self._user_input else user_input
-                if await ZendureApi.api_ha(self.hass, self._user_input) is None:
+                if await api_ha(self.hass, self._user_input) is None:
                     errors["base"] = "invalid input"
             except Exception as err:  # pylint: disable=broad-except
                 _LOGGER.error("Unexpected exception in local step: %s", err)
@@ -145,7 +145,7 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
         # Wenn wir hier sind, hat der Nutzer alles eingegeben (oder MQTT ist deaktiviert).
         # Wir validieren die Daten.
         try:
-            if await ZendureApi.api_ha(self.hass, self._user_input) is None:
+            if await api_ha(self.hass, self._user_input) is None:
                 errors["base"] = "invalid_token"
         except Exception as err:  # pylint: disable=broad-except
             _LOGGER.error("Unexpected exception during reconfigure: %s", err)
@@ -185,7 +185,7 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
             self._user_input = self._user_input | user_input
 
             try:
-                if await ZendureApi.api_ha(self.hass, self._user_input) is None:
+                if await api_ha(self.hass, self._user_input) is None:
                     errors["base"] = "invalid_token"
             except Exception as err:
                 _LOGGER.error("Unexpected exception during local reconfigure: %s", err)

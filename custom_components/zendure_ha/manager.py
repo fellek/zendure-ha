@@ -38,8 +38,10 @@ from .device import DeviceSettings, ZendureDevice, ZendureLegacy
 from .entity import EntityDevice
 from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
+from . import power_strategy
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureSensor
+from .power_port import DcSolarPowerPort, GridPowerPort, OffGridPowerPort, PowerPort
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -64,6 +66,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.check_reset = datetime.min
         self.p1meterEvent: Callable[[], None] | None = None
         self.p1_history: deque[int] = deque([25, -25], maxlen=8)
+        self.grid_port = GridPowerPort()
         self.p1_factor = 1
         self.update_count = 0
 
@@ -86,6 +89,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.idle_lvlmin = 0
         self.produced = 0
         self.pwr_low = 0
+
+        # NEU: Grid Port Instanziierung
+        self.grid_port = GridPowerPort()
+        self.device_ports: dict[str, list[PowerPort]] = {}
 
     async def loadDevices(self) -> None:
         if self.config_entry is None or (
@@ -173,6 +180,22 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 _LOGGER.error(traceback.format_exc())
 
         self.devices = list(self.api.devices.values())
+        _LOGGER.info("Loaded %s devices", len(self.devices))
+
+        # --- NEU: Modulare Port-Initialisierung ---
+        self.device_ports: dict[str, list[PowerPort]] = {}
+        for device in self.devices:
+            ports = []
+
+            # Nur Ports hinzufügen, wenn das Gerät diese Features auch physisch hat
+            # (Annahme: pwr_offgrid > 0 oder maxSolar > 0 sind Indikatoren)
+            if hasattr(device, 'pwr_offgrid') and device.maxSolar > 0:
+                ports.append(OffGridPowerPort(device))
+            if hasattr(device, 'solarInput') and device.maxSolar > 0:
+                ports.append(DcSolarPowerPort(device))
+
+            if ports:
+                self.device_ports[device.deviceId] = ports
         _LOGGER.info("Loaded %s devices", len(self.devices))
 
         # initialize the api & p1 meter
@@ -326,6 +349,25 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     if len(self.devices) > 0:
                         for d in self.devices:
                             await d.power_off()
+                case _:
+                    # Trigger immediate power distribution so the new mode
+                    # takes effect without waiting for the next P1 event.
+                    try:
+                        self._reset_power_state()
+                        p1 = 0
+                        if (state := self.hass.states.get(self.config_entry.data.get(CONF_P1METER, ""))) is not None:
+                            try:
+                                p1 = int(self.p1_factor * float(state.state))
+                            except (ValueError, TypeError):
+                                pass
+                        _LOGGER.info("Operation changed to %s, triggering power distribution with p1=%s", operation, p1)
+                        await self.powerChanged(p1, False, datetime.now())
+                    except Exception as err:
+                        _LOGGER.error("Power distribution after mode change failed: %s", err)
+                    finally:
+                        now = datetime.now()
+                        self.zero_fast = now + timedelta(seconds=SmartMode.TIMEFAST)
+                        self.zero_next = now + timedelta(seconds=SmartMode.TIMEZERO)
 
     async def _async_update_data(self) -> None:
 
@@ -394,14 +436,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # 2. CSV-String generieren
         csv_content = "\n".join(rows) + "\n"
-
         # 3. Sicheres Abkoppeln: Keine self-Abhängigkeit im Hintergrund!
-        await self.hass.async_add_executor_job(
-            self._sync_write_sim,
-            self.hass.config.path("simulation.csv"),
-            csv_content,
-            devices=self.devices  # <-- Übergabe die Liste der Geräte als Parameter!
-        )
+        await self.hass.async_add_executor_job(self._sync_write_sim, self.hass.config.path("simulation.csv"), csv_content, devices=self.devices)
+
     @staticmethod
     def _sync_write_sim(path: Path, content: str, devices: list[ZendureDevice] | None = None) -> None:
         """Synchronous file writer for background execution."""
@@ -411,7 +448,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Header nur generieren, wenn die Datei neu erstellt wird
         if write_header and devices:
             header = "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;" + ";".join([
-                f"bat;Prod;Home;{json.dumps(DeviceSettings(d.name, d.fugeGrp.name, d.charge_limit, d.discharge_limit, d.maxSolar, d.kWh, d.socSet.asNumber, d.minSoc.asNumber, default=vars))}"
+                f"bat;Prod;Home;{json.dumps(DeviceSettings(d.name, d.fuseGrp.name, d.charge_limit, d.discharge_limit, d.maxSolar, d.kWh, d.socSet.asNumber, d.minSoc.asNumber, default=vars))}"
                 for d in devices
                 ]) + "\n"
 
@@ -422,14 +459,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             f.write(content)
                         
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
-        # exit if there is nothing to do
-        if not self.hass.is_running or (new_state := event.data["new_state"]) is None:
-            return
+        if not self.hass.is_running or (new_state := event.data["new_state"]) is None: return
+        try: p1 = int(self.p1_factor * float(new_state.state))
+        except ValueError: return
 
-        try:  # convert the state to a float
-            p1 = int(self.p1_factor * float(new_state.state))
-        except ValueError:
-            return
+        # NEU: Zustand an Port delegieren
+        self.grid_port.update_state(p1)
 
         # Get time & update simulation
         time = datetime.now()
@@ -445,8 +480,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if len(self.p1_history) > 1:
             avg = int(sum(self.p1_history) / len(self.p1_history))
             stddev = SmartMode.P1_STDDEV_FACTOR * max(SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history)))
-            if isFast := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
-                self.p1_history.clear()
+            isFast = abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev
+            if isFast: self.p1_history.clear()
         else:
             isFast = False
         self.p1_history.append(p1)
@@ -466,323 +501,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     def _reset_power_state(self) -> None:
         """Reset all power distribution lists and counters before recalculating."""
-        self.zero_fast = datetime.max
-        self.charge.clear()
-        self.charge_limit = 0
-        self.charge_optimal = 0
-        self.charge_weight = 0
-        self.discharge.clear()
-        self.discharge_bypass = 0
-        self.discharge_limit = 0
-        self.discharge_optimal = 0
-        self.discharge_produced = 0
-        self.discharge_weight = 0
-        self.idle.clear()
-        self.idle_lvlmax = 0
-        self.idle_lvlmin = 100
-        self.produced = 0
-        for fg in self.fuse_groups:
-            fg.initPower = True
+        power_strategy.reset_power_state(self)
 
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
-        """Return the distribution setpoint."""
-        availableKwh = 0
-        setpoint = p1
-        power = 0
-
-        for d in self.devices:
-            if await d.power_get():
-                # get power production
-                d.pwr_produced = min(0, d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt)
-                self.produced -= d.pwr_produced
-
-                # SOCEMPTY device with no real battery activity: the grid consumption
-                # (gridInputPower ~120W) is uncontrollable inverter standby overhead.
-                # Classify as IDLE so the manager doesn't send pointless charge commands
-                # and doesn't distort the setpoint with power it cannot control.
-                if d.state == DeviceState.SOCEMPTY and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
-                    home = 0
-                    self.idle.append(d)
-                    self.idle_lvlmax = max(self.idle_lvlmax, d.electricLevel.asInt)
-                    self.idle_lvlmin = min(self.idle_lvlmin, d.electricLevel.asInt)
-                    _LOGGER.debug(
-                        "Classify %s => IDLE (SOCEMPTY): homeInput=%s offgrid=%s batteryIn=%s state=%s soc=%s",
-                        d.name, d.homeInput.asInt, d.pwr_offgrid, d.batteryInput.asInt, d.state.name, d.electricLevel.asInt,
-                    )
-                # only positive pwr_offgrid must be taken into account, negative values count a solarInput
-                elif (home := -d.homeInput.asInt + max(0, d.pwr_offgrid)) < 0:
-                    self.charge.append(d)
-                    self.charge_limit += d.fuseGrp.charge_limit(d)
-                    self.charge_optimal += d.charge_optimal
-                    self.charge_weight += d.pwr_max * (100 - d.electricLevel.asInt)
-                    setpoint += -d.homeInput.asInt
-                    _LOGGER.debug(
-                        "Classify %s => CHARGE: homeInput=%s offgrid=%s home=%s state=%s soc=%s setpoint_delta=%s",
-                        d.name, d.homeInput.asInt, d.pwr_offgrid, home, d.state.name, d.electricLevel.asInt, -d.homeInput.asInt,
-                    )
-                # SOCEMPTY means, it could not discharge the battery, but it is still possible to feed into the home using solarpower or offGrid
-                elif (home := d.homeOutput.asInt) > 0 or max(0, d.pwr_offgrid) > 0:
-                    self.discharge.append(d)
-                    self.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
-                    self.discharge_limit += d.fuseGrp.discharge_limit(d)
-                    self.discharge_optimal += d.discharge_optimal
-                    self.discharge_produced -= d.pwr_produced
-                    self.discharge_weight += d.pwr_max * d.electricLevel.asInt
-
-                    # NEUE MATHEMATIK FÜR AC-WECHSELRICHTER (SolarFlow 2400 AC)
-                    net_battery = home - max(0, d.pwr_offgrid)
-
-                    if home == 0 and net_battery <= 0:
-                        # WAKEUP: Wechselrichter schläft, zieht aber 'offgrid' aus dem Netz.
-                        # Da P1 hinter dem Wechselrichter misst, sieht P1 diesen Verbrauch nicht.
-                        # Wir senden einfach nur den P1-Wert. Das deckt den Hausverbrauch perfekt,
-                        # ohne dass wir ungewollt einspeisen (wie es passiert wäre, wenn wir offgrid addieren).
-                        _LOGGER.debug(
-                            "Classify %s => DISCHARGE (WAKEUP): homeOutput=%s offgrid=%s state=%s soc=%s",
-                            d.name, d.homeOutput.asInt, d.pwr_offgrid, d.state.name, d.electricLevel.asInt,
-                        )
-                    else:
-                        # ACTIVE: Wechselrichter ist aktiv (entlädt Akku oder leitet durch).
-                        # Wir MÜSSEN net_battery addieren, sonst oszilliert die Leistung!
-                        # Beispiel: P1=10, homeOutput=181 -> setpoint wird 10+135=145W.
-                        setpoint += home
-                        _LOGGER.debug(
-                            "Classify %s => DISCHARGE (ACTIVE): homeOutput=%s offgrid=%s state=%s soc=%s setpoint_delta=%s",
-                            d.name, d.homeOutput.asInt, d.pwr_offgrid, d.state.name, d.electricLevel.asInt, net_battery,
-                        )
-
-                else:
-                    self.idle.append(d)
-                    self.idle_lvlmax = max(self.idle_lvlmax, d.electricLevel.asInt)
-                    self.idle_lvlmin = min(self.idle_lvlmin, d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
-                    _LOGGER.debug(
-                        "Classify %s => IDLE: homeInput=%s homeOutput=%s offgrid=%s state=%s soc=%s",
-                        d.name, d.homeInput.asInt, d.homeOutput.asInt, d.pwr_offgrid, d.state.name, d.electricLevel.asInt,
-                    )
-
-                availableKwh += d.actualKwh
-                power += d.pwr_offgrid + home + d.pwr_produced
-
-        # Update the power entities
-        self.power.update_value(power)
-        self.availableKwh.update_value(availableKwh)
-
-        # discharge_bypass accumulates the solar-only power produced by SOCFULL devices.
-        # Subtract it from setpoint to avoid over-discharging from grid, but clamp so
-        # setpoint never goes below 0 when p1 >= 0: a SOCFULL device producing solar
-        # should still cover home demand, not trigger charge mode (fixes #1151 output
-        # cycling to 0W with bypass forbidden + 100% SoC).
-        if self.discharge_bypass > 0:
-            setpoint = max(0 if p1 >= 0 else setpoint - self.discharge_bypass, setpoint - self.discharge_bypass)
-
-        # Update power distribution.
-        _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
-        match self.operation:
-            case ManagerMode.MATCHING:
-                if setpoint < 0:
-                    await self.power_charge(setpoint, time)
-                else:
-                    await self.power_discharge(setpoint)
-
-            case ManagerMode.MATCHING_DISCHARGE:
-                # Only discharge, do nothing if setpoint is negative
-                await self.power_discharge(max(0, setpoint))
-
-            case ManagerMode.MATCHING_CHARGE | ManagerMode.STORE_SOLAR:
-                # Allow discharge of produced power in MATCHING_CHARGE-Mode, otherwise only charge
-                # d.pwr_produced is negative, but self.produced is positive
-                if setpoint > 0 and self.produced > SmartMode.POWER_START and self.operation == ManagerMode.MATCHING_CHARGE:
-                    await self.power_discharge(min(self.produced, setpoint))
-                # send device into idle-mode
-                elif setpoint > 0:
-                    await self.power_discharge(0)
-                else:
-                    await self.power_charge(min(0, setpoint), time)
-
-            case ManagerMode.MANUAL:
-                # Manual power into or from home
-                if (setpoint := int(self.manualpower.asNumber)) > 0:
-                    await self.power_discharge(setpoint)
-                    _LOGGER.info("Set Manual power discharging: isFast:%s, setpoint:%sW stored:%sW", isFast, setpoint, self.produced)
-                else:
-                    await self.power_charge(setpoint, time)
-                    _LOGGER.info("Set Manual power charging: isFast:%s, setpoint:%sW stored:%sW", isFast, setpoint, self.produced)
-
-            case ManagerMode.OFF:
-                self.operationstate.update_value(ManagerState.OFF.value)
-
-    async def power_charge(self, setpoint: int, time: datetime) -> None:
-        """Charge devices."""
-        _LOGGER.info("Charge => setpoint %sW, devices=%s, charge_limit=%s, charge_optimal=%s",
-                      setpoint, len(self.charge), self.charge_limit, self.charge_optimal)
-
-        # stop discharging devices
-        for d in self.discharge:
-            stop_pwr = 0 if d.pwr_offgrid == 0 else -SmartMode.POWER_IDLE_OFFSET
-            _LOGGER.debug("Charge: stop discharge %s => power_charge(%s) [offgrid=%s]", d.name, stop_pwr, d.pwr_offgrid)
-            await d.power_charge(stop_pwr)
-
-        # prevent hysteria
-        if self.charge_time > time:
-            if self.charge_time == datetime.max:
-                cooldown = (
-                    SmartMode.HYSTERESIS_FAST_COOLDOWN
-                    if (time - self.charge_last).total_seconds() > SmartMode.HYSTERESIS_LONG_COOLDOWN
-                    else SmartMode.HYSTERESIS_SLOW_COOLDOWN
-                )
-                self.charge_time = time + timedelta(seconds=cooldown)
-                self.charge_last = self.charge_time
-                self.pwr_low = 0
-                _LOGGER.debug("Charge: hysteresis started, cooldown=%ss, charge_time=%s", cooldown, self.charge_time)
-            _LOGGER.debug("Charge: hysteresis active, setpoint %s => 0 (waiting until %s)", setpoint, self.charge_time)
-            setpoint = 0
-        self.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
-
-        # Cap setpoint to the maximum possible charge limit of all devices
-        limit = self.charge_limit
-        capped_setpoint = max(setpoint, limit)
-        if capped_setpoint != setpoint:
-            _LOGGER.debug("Charge: setpoint capped by charge_limit: %s => %s (limit=%s)", setpoint, capped_setpoint, limit)
-        setpoint = capped_setpoint
-
-        # Check if we need to wake up idle devices
-        dev_start = min(0, setpoint - self.charge_optimal * SmartMode.WAKEUP_CAPACITY_FACTOR) if setpoint < -SmartMode.POWER_START else 0
-        remaining_setpoint = setpoint
-        _LOGGER.debug("Charge: distributing setpoint=%s across %s devices, dev_start=%s, charge_weight=%s",
-                       setpoint, len(self.charge), dev_start, self.charge_weight)
-
-        for i, d in enumerate(sorted(self.charge, key=lambda d: d.electricLevel.asInt, reverse=True)):
-            # Weight per device: pwr_max * remaining capacity (100 - SOC%).
-            device_weight = d.pwr_max * (100 - d.electricLevel.asInt)
-
-            if self.charge_weight != 0:
-                pwr = int(remaining_setpoint * device_weight / self.charge_weight)
-            else:
-                pwr = 0
-            self.charge_weight -= device_weight
-            pwr_weighted = pwr
-
-            # Clamp: pwr_max is negative in charge context (set by fusegroup.charge_limit),
-            # remaining_setpoint is also negative. max() picks the least-negative value.
-            pwr = max(pwr, remaining_setpoint, d.pwr_max)
-
-            pwr_clamped = pwr
-            # Hysteresis logic for the first device in a multi-device setup
-            pwr_before_hyst = pwr
-            if len(self.charge) > 1 and i == 0:
-                abs_start = abs(d.charge_start)
-                abs_optimal = abs(d.charge_optimal)
-                abs_pwr = abs(pwr)
-
-                delta = abs_start * SmartMode.HYSTERESIS_START_FACTOR - abs_pwr
-                if delta >= 0:
-                    self.pwr_low = 0
-                else:
-                    self.pwr_low += int(-delta)
-
-                if self.pwr_low > abs_optimal:
-                    pwr = 0
-                _LOGGER.debug(
-                    "Charge: hysteresis[%s] abs_pwr=%s threshold=%s delta=%s pwr_low=%s/%s => pwr %s->%s",
-                    d.name, abs_pwr, abs_start * SmartMode.HYSTERESIS_START_FACTOR, delta, self.pwr_low, abs_optimal, pwr_before_hyst, pwr,
-                )
-
-            _LOGGER.debug(
-                "Charge: [%s/%s] %s soc=%s%% pwr_max=%s weight=%s remaining=%s pwr: weighted=%s clamped=%s final=%s",
-                i, len(self.charge), d.name, d.electricLevel.asInt, d.pwr_max, device_weight,
-                remaining_setpoint, pwr_weighted, pwr_clamped, pwr,
-            )
-
-            actual_pwr = await d.power_charge(pwr)
-            remaining_setpoint -= actual_pwr
-            dev_start += -1 if pwr != 0 and d.electricLevel.asInt > self.idle_lvlmin + SmartMode.SOC_IDLE_BUFFER else 0
-
-            _LOGGER.debug("Charge: [%s] %s actual=%s remaining_after=%s", i, d.name, actual_pwr, remaining_setpoint)
-
-        # start idle device if needed
-        _LOGGER.debug("Charge: done distributing, remaining=%s dev_start=%s idle_count=%s",
-                       remaining_setpoint, dev_start, len(self.idle))
-        if dev_start < 0 and len(self.idle) > 0:
-            self.idle.sort(key=lambda d: d.electricLevel.asInt, reverse=False)
-            for d in self.idle:
-                await d.power_charge(
-                    -SmartMode.POWER_START - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0,
-                                                                                                               d.pwr_offgrid))
-                if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
-                    break
-            self.pwr_low = 0
-
-    async def power_discharge(self, setpoint: int) -> None:
-        """Discharge devices."""
-        _LOGGER.info("Discharge => setpoint %sW", setpoint)
-        self.operationstate.update_value(
-            ManagerState.DISCHARGE.value if setpoint > 0 and self.discharge else ManagerState.IDLE.value)
-
-        # reset hysteria time
-        if self.charge_time != datetime.max:  # RICHTIG
-            self.charge_time = datetime.max   # RICHTIG
-            self.pwr_low = 0
-
-        # stop charging devices
-        for d in self.charge:
-            # SF 2400 Quirk: 0W würde den Inverter schlafen legen, daher POWER_IDLE_OFFSET
-            await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 else SmartMode.POWER_IDLE_OFFSET)
-
-        # Determine if we only need to pass through solar power
-        solaronly = self.discharge_produced >= setpoint
-        limit = self.discharge_produced if solaronly else self.discharge_limit
-
-        # Cap setpoint to available limit
-        setpoint = min(setpoint, limit)
-
-        dev_start = max(0,
-                        setpoint - self.discharge_optimal * SmartMode.WAKEUP_CAPACITY_FACTOR - self.discharge_produced) if setpoint > SmartMode.POWER_START else 0
-        remaining_setpoint = setpoint
-
-        for i, d in enumerate(sorted(self.discharge, key=lambda d: d.electricLevel.asInt, reverse=False)):
-            # Weight per device: pwr_max * SOC%.
-            device_weight = d.pwr_max * d.electricLevel.asInt
-
-            if self.discharge_weight != 0:
-                pwr = int(remaining_setpoint * device_weight / self.discharge_weight)
-            elif len(self.discharge) > i:
-                pwr = int(remaining_setpoint / (len(self.discharge) - i))
-            else:
-                pwr = 0
-
-            # SOCFULL devices should only pass through solar, not drain battery
-            if pwr < -d.pwr_produced and d.state == DeviceState.SOCFULL:
-                pwr = -d.pwr_produced
-
-            self.discharge_weight -= device_weight
-
-            # Clamp 1: Device cannot discharge faster than its hardware limit
-            pwr = min(pwr, d.pwr_max)
-
-            # Clamp 2: Device cannot discharge more than what is left of the setpoint
-            pwr = min(pwr, remaining_setpoint)
-
-            # Hysteresis logic for the first device in a multi-device setup
-            if len(self.discharge) > 1 and i == 0 and d.state != DeviceState.SOCFULL:
-                delta = d.discharge_start * SmartMode.HYSTERESIS_START_FACTOR - pwr
-                if delta <= 0:
-                    self.pwr_low = 0
-                else:
-                    self.pwr_low += int(delta)
-
-                if self.pwr_low > d.discharge_optimal:
-                    pwr = 0
-
-            actual_pwr = await d.power_discharge(pwr)
-            remaining_setpoint -= actual_pwr
-            dev_start += 1 if pwr != 0 and d.electricLevel.asInt + 3 < self.idle_lvlmax else 0
-
-        # start idle device if needed
-        if dev_start > 0 and len(self.idle) > 0:
-            self.idle.sort(key=lambda d: d.electricLevel.asInt, reverse=True)
-            for d in self.idle:
-                if d.state != DeviceState.SOCEMPTY:
-                    await d.power_discharge(SmartMode.POWER_START)
-                    if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
-                        break
-            self.pwr_low = 0
+        """Classify devices and distribute power."""
+        await power_strategy.classify_and_dispatch(self, p1, isFast, time)
