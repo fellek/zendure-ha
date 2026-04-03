@@ -8,17 +8,28 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from custom_components.zendure_ha.device import ZendureLegacy
-from custom_components.zendure_ha.sensor import ZendureRestoreSensor, ZendureSensor
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class Hyper2000(ZendureLegacy):
-    def __init__(self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any) -> None:
+    def __init__(self, hass: HomeAssistant, deviceId: str, name: str, definition: Any, parent: str | None = None) -> None:
         """Initialise Hyper2000."""
-        super().__init__(hass, deviceId, prodName, definition["productModel"], definition)
+        # Hinweis: Parameter 'prodName' wurde zu 'name' angepasst für Konsistenz zur Basisklasse
+        super().__init__(hass, deviceId, name, definition["productModel"], definition, parent)
+
         self.setLimits(-1200, 1200)
         self.maxSolar = -1600
+
+        # --- NEU: Port-Konfiguration ---
+        self.pv_port_count = 1  # Gerät hat einen DC-Eingang (maxSolar ist definiert)
+        # _has_offgrid bleibt False (Standard), da keine Offgrid-Steckdose existiert
+        # ------------------------------
+
+        # --- NEU: Port-Initialisierung ---
+        # Muss ganz am Ende stehen, damit maxSolar und Flags gesetzt sind
+        self._init_power_ports()
+        # ---------------------------------
 
     async def charge(self, power: int) -> int:
         _LOGGER.info("Power charge %s => %s", self.name, power)

@@ -6,21 +6,18 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from custom_components.zendure_ha.device import ZendureZenSdk
-from custom_components.zendure_ha.sensor import ZendureRestoreSensor, ZendureSensor
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class SolarFlow1600(ZendureZenSdk):
-    def __init__(self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any) -> None:
+    def __init__(self, hass: HomeAssistant, deviceId: str, name: str, definition: Any, parent: str | None = None) -> None:
         """Initialise SolarFlow1600."""
-        super().__init__(hass, deviceId, prodName, definition["productModel"], definition)
+        # Hinweis: Parameter 'prodName' wurde zu 'name' angepasst für Konsistenz zur Basisklasse
+        super().__init__(hass, deviceId, name, definition["productModel"], definition, parent)
         self.setLimits(-1600, 1600)
         self.maxSolar = -1600
-        self.offGrid = ZendureSensor(self, "gridOffPower", None, "W", "power", "measurement")
-        self.aggrOffGrid = ZendureRestoreSensor(self, "aggrGridOffPower", None, "kWh", "energy", "total", 2)
+        self.pv_port_count = 1       # Hat einen DC-Eingang
+        self._has_offgrid = True     # Hat eine Offgrid-Steckdose
 
-    @property
-    def pwr_offgrid(self) -> int:
-        """Get the offgrid power."""
-        return self.offGrid.asInt
+        self._init_power_ports()
