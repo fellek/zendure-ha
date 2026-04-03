@@ -25,7 +25,7 @@ from .sensor import ZendureRestoreSensor, ZendureSensor
 from . import ble as ble_transport
 from . import mqtt_protocol
 from .battery import ZendureBattery
-from .power_port import DcSolarPowerPort, OffGridPowerPort
+from .power_port import PowerPort, DcSolarPowerPort, OffGridPowerPort
 
 if TYPE_CHECKING:
     from .api import ZendureApi
@@ -80,6 +80,10 @@ class ZendureDevice(EntityDevice):
         self.state: DeviceState = DeviceState.OFFLINE
 
         self.create_entities()
+        # --- HIER EINFÜGEN ---
+        self.ports: list[PowerPort] = []      # Initialisiere die leere Liste
+        self._init_power_ports()              # Befülle die Liste mit den Ports
+        # ---------------------
 
     def create_entities(self) -> None:
         """Create the device entities."""

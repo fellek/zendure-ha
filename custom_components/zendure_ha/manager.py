@@ -185,17 +185,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # --- NEU: Modulare Port-Initialisierung ---
         self.device_ports: dict[str, list[PowerPort]] = {}
         for device in self.devices:
-            ports = []
-
-            # Nur Ports hinzufügen, wenn das Gerät diese Features auch physisch hat
-            # (Annahme: pwr_offgrid > 0 oder maxSolar > 0 sind Indikatoren)
-            if hasattr(device, 'pwr_offgrid') and device.maxSolar > 0:
-                ports.append(OffGridPowerPort(device))
-            if hasattr(device, 'solarInput') and device.maxSolar > 0:
-                ports.append(DcSolarPowerPort(device))
-
-            if ports:
-                self.device_ports[device.deviceId] = ports
+            # Nicht mehr selbst instanziieren!
+            # Stattdessen:
+            if device.ports:
+                self.device_ports[device.deviceId] = device.ports
         _LOGGER.info("Loaded %s devices", len(self.devices))
 
         # initialize the api & p1 meter

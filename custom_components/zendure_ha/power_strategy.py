@@ -32,8 +32,6 @@ def reset_power_state(mgr: ZendureManager) -> None:
     mgr.idle_lvlmax = 0
     mgr.idle_lvlmin = 100
     mgr.produced = 0
-    for fg in mgr.fuse_groups:
-        fg.initPower = True
 
 
 async def classify_and_dispatch(mgr: ZendureManager, p1: int, isFast: bool, time: datetime) -> None:
@@ -65,19 +63,13 @@ async def classify_and_dispatch(mgr: ZendureManager, p1: int, isFast: bool, time
 
             elif (home := -d.homeInput.asInt + offgrid_power) < 0:
                 mgr.charge.append(d)
-                mgr.charge_limit += d.fuseGrp.charge_limit(d)
-                mgr.charge_optimal += d.charge_optimal
-                mgr.charge_weight += d.pwr_max * (100 - d.electricLevel.asInt)
                 setpoint += -d.homeInput.asInt
                 _LOGGER.debug("Classify %s => CHARGE: homeInput=%s offgrid=%s home=%s state=%s soc=%s setpoint_delta=%s", d.name, d.homeInput.asInt, offgrid_power, home, d.state.name, d.electricLevel.asInt, -d.homeInput.asInt)
 
             elif (home := d.homeOutput.asInt) > 0 or offgrid_power > 0:
                 mgr.discharge.append(d)
                 mgr.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
-                mgr.discharge_limit += d.fuseGrp.discharge_limit(d)
-                mgr.discharge_optimal += d.discharge_optimal
                 mgr.discharge_produced -= d.pwr_produced
-                mgr.discharge_weight += d.pwr_max * d.electricLevel.asInt
 
                 net_battery = home - offgrid_power
 
@@ -98,6 +90,26 @@ async def classify_and_dispatch(mgr: ZendureManager, p1: int, isFast: bool, time
 
             availableKwh += d.actualKwh
             power += offgrid_power + home + d.pwr_produced
+
+    # 1. Limits für Ladegruppen berechnen
+    charge_groups = {d.fuseGrp for d in mgr.charge}
+    for fg in charge_groups:
+        fg.update_charge_limits()  # Setzt pwr_max für alle Geräte in der Gruppe
+    # 2. Limits für Entladegruppen berechnen
+    discharge_groups = {d.fuseGrp for d in mgr.discharge}
+    for fg in discharge_groups:
+        fg.update_discharge_limits()  # Setzt pwr_max für alle Geräte in der Gruppe
+
+    # 3. Die Limits summieren (ersetzt die gelöschten Zeilen aus der Schleife)
+    mgr.charge_limit = sum(d.pwr_max for d in mgr.charge)
+    mgr.discharge_limit = sum(d.pwr_max for d in mgr.discharge)
+
+    # Optimal und Weight müssen wir auch noch summieren,
+    # falls die das vorher in der Schleife taten:
+    mgr.charge_optimal = sum(d.charge_optimal for d in mgr.charge)
+    mgr.discharge_optimal = sum(d.discharge_optimal for d in mgr.discharge)
+    mgr.charge_weight = sum(d.pwr_max * (100 - d.electricLevel.asInt) for d in mgr.charge)
+    mgr.discharge_weight = sum(d.pwr_max * d.electricLevel.asInt for d in mgr.discharge)
 
     # Update the power entities
     mgr.power.update_value(power)
