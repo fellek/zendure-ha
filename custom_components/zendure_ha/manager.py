@@ -90,118 +90,106 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.produced = 0
         self.pwr_low = 0
 
-        # NEU: Grid Port Instanziierung
-        self.grid_port = GridPowerPort()
         self.device_ports: dict[str, list[PowerPort]] = {}
 
-    async def loadDevices(self) -> None:
-        if self.config_entry is None or (
-        data := await ZendureApi.connect(self.hass, dict(self.config_entry.data), True)) is None:
-            return
-        if (mqtt := data.get("mqtt")) is None:
-            return
+    # -------------------------------------------------------------------------
+    # Helper Methoden für loadDevices
+    # -------------------------------------------------------------------------
 
-        # get version number from integration
-        integration = await async_get_integration(self.hass, DOMAIN)
-        if integration is None:
-            _LOGGER.error("Integration not found for domain: %s", DOMAIN)
-            return
-        self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
+    async def _ensure_mqtt_user(self, device_id: str) -> None:
+        """
+        Stellt sicher, dass für das Gerät ein MQTT-Benutzer in Home Assistant existiert.
+        """
+        try:
+            # Passwort-Hash generieren
+            psw = hashlib.md5(device_id.encode()).hexdigest().upper()[8:24]  # noqa: S324
 
-        # --- NEU: API sauber vor der Schleife erstellen ---
-        self.api = ZendureApi(
-            self.hass,
-            self.config_entry.data,
-            mqtt
-        )
-        # ----------------------------------------
+            # Auth-Provider holen
+            provider: auth_ha.HassAuthProvider = auth_ha.async_get_provider(self.hass)
 
-        self.operationmode = (
-            ZendureRestoreSelect(self, "Operation",
-                                 {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging",
-                                  5: "store_solar"}, self.update_operation),
+            # Credentials prüfen oder erstellen
+            credentials = await provider.async_get_or_create_credentials({"username": device_id.lower()})
+            user = await self.hass.auth.async_get_user_by_credentials(credentials)
+
+            if user is None:
+                # User existiert nicht -> Neu anlegen
+                # local_only=True ist wichtig für technische MQTT-Accounts
+                user = await self.hass.auth.async_create_user(
+                    device_id,
+                    group_ids=[GROUP_ID_USER],
+                    local_only=True
+                )
+                await provider.async_add_auth(device_id.lower(), psw)
+                await self.hass.auth.async_link_user(user, credentials)
+                _LOGGER.info("Created new MQTT user for device: %s", device_id)
+            else:
+                # User existiert -> Passwort aktualisieren (falls sich Config geändert hat)
+                await provider.async_change_password(device_id.lower(), psw)
+                _LOGGER.debug("Updated password for existing MQTT user: %s", device_id)
+
+        except Exception as err:
+            # Wir lassen das Initialisieren des Gerätes nicht daran scheitern,
+            # falls das User-Management schiefgeht.
+            _LOGGER.error("Failed to manage MQTT user for %s: %s", device_id, err)
+
+    def _setup_manager_entities(self) -> None:
+        """Erstellt die Entitäten (Sensoren/Selects) für den Manager selbst."""
+        self.operationmode = ZendureRestoreSelect(
+            self,
+            "Operation",
+            {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"},
+            self.update_operation
         )
         self.operationstate = ZendureSensor(self, "operation_state")
-        self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000,
-                                                NumberMode.BOX, True)
+        self.manualpower = ZendureRestoreNumber(
+            self, "manual_power", None, None, "W", "power", 12000, -12000,
+            NumberMode.BOX, True
+        )
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
 
-        # load devices
-        for dev in data["deviceList"]:
-            try:
-                if (deviceId := dev["deviceKey"]) is None or (prodModel := dev["productModel"]) is None:
-                    continue
-                _LOGGER.info("Adding device: %s %s => %s", deviceId, prodModel, dev)
+    async def _load_single_device(self, dev: dict) -> None:
+        """Initialisiert ein einzelnes Gerät und konfiguriert es."""
+        try:
+            deviceId = dev.get("deviceKey")
+            prodModel = dev.get("productModel")
 
-                init = ZendureApi.createdevice.get(prodModel.lower().strip(), None)
-                if init is None:
-                    _LOGGER.info("Device %s is not supported!", prodModel)
-                    continue
+            if deviceId is None or prodModel is None:
+                return
 
-                # create the device and mqtt server
-                device = init(self.hass, deviceId, dev.get("deviceName", prodModel), dev)
+            _LOGGER.info("Adding device: %s %s => %s", deviceId, prodModel, dev)
 
-                # --- LÖSCHEN: Das alte hasattr ist jetzt obsolet! ---
-                # if not hasattr(self, 'api'):
-                #     self.api = ZendureApi(...)
-                # ---------------------------------------
+            # 1. Geräte-Klasse finden
+            init = ZendureApi.createdevice.get(prodModel.lower().strip())
+            if init is None:
+                _LOGGER.info("Device %s is not supported!", prodModel)
+                return
 
-                device.api = self.api
-                self.api.devices[deviceId] = device
-                device.discharge_start = device.discharge_limit // 10
-                device.discharge_optimal = device.discharge_limit // 4
+            # 2. Instanziieren
+            device = init(self.hass, deviceId, dev.get("deviceName", prodModel), dev)
 
-                # Check if we should automatically manage MQTT users (opt-in)
-                auto_mqtt = self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)
-                if auto_mqtt and self.api.local_server is not None and self.api.local_server != "":
-                    try:
-                        psw = hashlib.md5(deviceId.encode()).hexdigest().upper()[8:24]  # noqa: S324
-                        provider: auth_ha.HassAuthProvider = auth_ha.async_get_provider(self.hass)
-                        credentials = await provider.async_get_or_create_credentials({"username": deviceId.lower()})
-                        user = await self.hass.auth.async_get_user_by_credentials(credentials)
-                        if user is None:
-                            # Enforce local_only=True for technical MQTT accounts
-                            user = await self.hass.auth.async_create_user(deviceId, group_ids=[GROUP_ID_USER], local_only=True)
-                            await provider.async_add_auth(deviceId.lower(), psw)
-                            await self.hass.auth.async_link_user(user, credentials)
-                        else:
-                            await provider.async_change_password(deviceId.lower(), psw)
+            # 3. Verknüpfen
+            device.api = self.api
+            self.api.devices[deviceId] = device
+            device.discharge_start = device.discharge_limit // 10
+            device.discharge_optimal = device.discharge_limit // 4
 
-                        _LOGGER.info("Managed MQTT user for device: %s", deviceId)
+            # 4. Optional: MQTT User anlegen
+            auto_mqtt = self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)
+            if auto_mqtt and self.api.local_server:
+                await self._ensure_mqtt_user(deviceId)
+            elif auto_mqtt:
+                _LOGGER.debug("Skipping auto MQTT user creation for %s: Local server not configured.", deviceId)
 
-                    except Exception as err:
-                        _LOGGER.error("Failed to manage MQTT user for %s: %s", deviceId, err)
-                elif auto_mqtt:
-                    _LOGGER.debug("Skipping auto MQTT user creation for %s: Local server not configured.", deviceId)
-            except Exception as e:
-                _LOGGER.error("Unable to create device %s!", e)
-                _LOGGER.error(traceback.format_exc())
+        except Exception as e:
+            _LOGGER.error("Unable to create device %s!", e)
+            _LOGGER.error(traceback.format_exc())
 
-        self.devices = list(self.api.devices.values())
-        _LOGGER.info("Loaded %s devices", len(self.devices))
-
-        # --- NEU: Modulare Port-Initialisierung ---
-        self.device_ports: dict[str, list[PowerPort]] = {}
-        for device in self.devices:
-            # Nicht mehr selbst instanziieren!
-            # Stattdessen:
-            if device.ports:
-                self.device_ports[device.deviceId] = device.ports
-        _LOGGER.info("Loaded %s devices", len(self.devices))
-
-        # initialize the api & p1 meter
-        await self.update_fusegroups()
-        self.update_p1meter(self.config_entry.data.get(CONF_P1METER, "sensor.power_actual"))
-
-        # Probe devices to resolve connection status without user interaction.
-        # After restart, self.mqtt is None and lastseen is datetime.min — the
-        # restored connection select value is known but no message has arrived yet.
-        # Sending getAll on all connected brokers triggers a properties/report
-        # response, which flows through mqtt_msg_cloud/mqtt_msg_local and sets
-        # device.mqtt + lastseen, resolving the status automatically.
+    async def _probe_devices_startup(self) -> None:
+        """Sendet Initial-Requests an Geräte um Status aufzulösen."""
         from .device import ZendureZenSdk
+
         for device in self.devices:
             try:
                 if isinstance(device, ZendureZenSdk) and device.connection.value == SmartMode.ZENSDK:
@@ -209,38 +197,85 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     if result:
                         await device.mqttProperties(result)
                 else:
+                    # Standard MQTT Probe
                     device.mqttPublish(device.topic_read, {"properties": ["getAll"]}, self.api.mqtt_cloud)
                     if self.api.mqtt_local is not None and self.api.mqtt_local.is_connected():
                         device.mqttPublish(device.topic_read, {"properties": ["getAll"]}, self.api.mqtt_local)
             except Exception as err:
                 _LOGGER.debug("Startup probe failed for %s: %s", device.name, err)
 
-        await asyncio.sleep(1)  # allow other tasks to run
+    async def _trigger_initial_power_distribution(self) -> None:
+        """Löst die erste Leistungsverteilung nach dem Start aus, falls nötig."""
+        if self.operation == ManagerMode.OFF or not any(d.online for d in self.devices):
+            return
 
-        # After startup, if the operation mode was restored (e.g. MANUAL),
-        # trigger an initial power distribution. Without this, MANUAL mode
-        # would sit idle until the first P1 meter event arrives.
-        if self.operation != ManagerMode.OFF and any(d.online for d in self.devices):
-            _LOGGER.info("Startup: triggering initial power distribution for %s", self.operation)
-            try:
-                self._reset_power_state()
-                p1 = 0
-                if (entity := self.hass.states.get(self.config_entry.data.get(CONF_P1METER, ""))) is not None:
-                    try:
-                        p1 = int(self.p1_factor * float(entity.state))
-                    except (ValueError, TypeError):
-                        pass
-                await self.powerChanged(p1, False, datetime.now())
-            except Exception as err:
-                _LOGGER.error("Startup power distribution failed: %s", err)
-            finally:
-                # _reset_power_state() sets zero_fast=datetime.max to prevent
-                # re-entry during processing. In _p1_changed this is reset at
-                # line 457, but our direct call bypasses that — so we must
-                # reset it here, otherwise ALL future P1 events are blocked.
-                now = datetime.now()
-                self.zero_fast = now + timedelta(seconds=SmartMode.TIMEFAST)
-                self.zero_next = now + timedelta(seconds=SmartMode.TIMEZERO)
+        _LOGGER.info("Startup: triggering initial power distribution for %s", self.operation)
+        try:
+            self._reset_power_state()
+            p1 = 0
+            # Versuche P1 zu lesen
+            if (entity := self.hass.states.get(self.config_entry.data.get(CONF_P1METER, ""))) is not None:
+                try:
+                    p1 = int(self.p1_factor * float(entity.state))
+                except (ValueError, TypeError):
+                    pass
+            await self.powerChanged(p1, False, datetime.now())
+        except Exception as err:
+            _LOGGER.error("Startup power distribution failed: %s", err)
+        finally:
+            # Timer-Reset
+            now = datetime.now()
+            self.zero_fast = now + timedelta(seconds=SmartMode.TIMEFAST)
+            self.zero_next = now + timedelta(seconds=SmartMode.TIMEZERO)
+
+    # -------------------------------------------------------------------------
+    # Haupt-Initialisierungsmethode
+    # -------------------------------------------------------------------------
+
+    async def loadDevices(self) -> None:
+        # 1. Verbindung zur API aufbauen & Version holen
+        if self.config_entry is None or \
+           (data := await ZendureApi.connect(self.hass, dict(self.config_entry.data), True)) is None:
+            return
+        if (mqtt := data.get("mqtt")) is None:
+            return
+
+        integration = await async_get_integration(self.hass, DOMAIN)
+        if integration is None:
+            _LOGGER.error("Integration not found for domain: %s", DOMAIN)
+            return
+        self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
+
+        # 2. API Client initialisieren
+        self.api = ZendureApi(self.hass, self.config_entry.data, mqtt)
+
+        # 3. Manager-Entitäten erstellen (Sensoren, Selects)
+        self._setup_manager_entities()
+
+        # 4. Geräte laden und konfigurieren
+        for dev in data.get("deviceList", []):
+            await self._load_single_device(dev)
+
+        self.devices = list(self.api.devices.values())
+        _LOGGER.info("Loaded %s devices", len(self.devices))
+
+        # 5. Ports initialisieren
+        self.device_ports: dict[str, list[PowerPort]] = {}
+        for device in self.devices:
+            if device.ports:
+                self.device_ports[device.deviceId] = device.ports
+
+        # 6. FuseGroups und P1 Meter finalisieren
+        await self.update_fusegroups()
+        self.update_p1meter(self.config_entry.data.get(CONF_P1METER, "sensor.power_actual"))
+
+        # 7. Geräte anpingen (Startup Probe)
+        await self._probe_devices_startup()
+
+        await asyncio.sleep(1)  # Kurze Pause
+
+        # 8. Initiale Leistungsverteilung triggern
+        await self._trigger_initial_power_distribution()
 
     async def update_fusegroups(self) -> None:
         _LOGGER.info("Update fusegroups")
@@ -394,10 +429,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             device.setStatus()
         self.update_count += 1
         self.totalKwh.update_value(kwh)
-
-        # Manually update the timer
-        #if self.hass and self.hass.loop.is_running():
-        #    self._schedule_refresh()
 
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""
