@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +28,87 @@ class _DistDirection:
 
 CHARGE_DIR = _DistDirection("Charge", -1, True)
 DISCHARGE_DIR = _DistDirection("Discharge", +1, False)
+
+
+# ---------------------------------------------------------------------------
+#  Hysteresis state: prevents rapid on/off cycling of devices
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HysteresisState:
+    """Tracks hysteresis state for power distribution.
+
+    - charge_cooldown: prevents immediate re-charging after a charge stop
+    - accumulator (pwr_low): tracks underutilization to shut down unnecessary devices
+    """
+
+    accumulator: int = 0
+    charge_time: datetime = field(default_factory=lambda: datetime.max)
+    charge_last: datetime = field(default_factory=lambda: datetime.min)
+
+    def reset(self) -> None:
+        """Reset all hysteresis state (e.g. on mode switch to discharge)."""
+        self.accumulator = 0
+        self.charge_time = datetime.max
+        self.charge_last = datetime.min
+
+    def reset_accumulator(self) -> None:
+        """Reset only the accumulator (e.g. after waking idle devices)."""
+        self.accumulator = 0
+
+    def apply_charge_cooldown(self, setpoint: int, time: datetime, operationstate: Any) -> int:
+        """Apply cooldown hysteresis before allowing charge. Returns adjusted setpoint."""
+        if self.charge_time > time:
+            if self.charge_time == datetime.max:
+                cooldown = (
+                    SmartMode.HYSTERESIS_FAST_COOLDOWN
+                    if (time - self.charge_last).total_seconds() > SmartMode.HYSTERESIS_LONG_COOLDOWN
+                    else SmartMode.HYSTERESIS_SLOW_COOLDOWN
+                )
+                self.charge_time = time + timedelta(seconds=cooldown)
+                self.charge_last = self.charge_time
+                self.accumulator = 0
+                _LOGGER.debug("Charge: hysteresis started, cooldown=%ss, charge_time=%s", cooldown, self.charge_time)
+            _LOGGER.debug("Charge: hysteresis active, setpoint %s => 0 (waiting until %s)", setpoint, self.charge_time)
+            return 0
+        else:
+            operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
+            return setpoint
+
+    def apply_device_suppression(self, pwr: int, is_charge: bool, start: int, optimal: int, state: DeviceState, label: str, name: str) -> int:
+        """Apply per-device hysteresis to suppress underpowered devices.
+
+        Tracks whether a device consistently receives less power than its start
+        threshold. Once accumulated deficit exceeds optimal, suppresses the device.
+        """
+        pwr_before = pwr
+        if is_charge:
+            abs_start = abs(start)
+            abs_optimal = abs(optimal)
+            abs_pwr = abs(pwr)
+
+            delta = abs_start * SmartMode.HYSTERESIS_START_FACTOR - abs_pwr
+            if delta >= 0:
+                self.accumulator = 0
+            else:
+                self.accumulator += int(-delta)
+
+            if self.accumulator > abs_optimal:
+                pwr = 0
+            _LOGGER.debug("%s: hysteresis[%s] abs_pwr=%s threshold=%s delta=%s accumulator=%s/%s => pwr %s->%s",
+                          label, name, abs_pwr, abs_start * SmartMode.HYSTERESIS_START_FACTOR,
+                          delta, self.accumulator, abs_optimal, pwr_before, pwr)
+        elif state != DeviceState.SOCFULL:
+            delta = start * SmartMode.HYSTERESIS_START_FACTOR - pwr
+            if delta <= 0:
+                self.accumulator = 0
+            else:
+                self.accumulator += int(delta)
+
+            if self.accumulator > optimal:
+                pwr = 0
+
+        return pwr
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +318,8 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int) -> None:
         ManagerState.DISCHARGE.value if setpoint > 0 and mgr.discharge else ManagerState.IDLE.value)
 
     # Reset charge hysteresis on mode switch
-    if mgr.charge_time != datetime.max:
-        mgr.charge_time = datetime.max
-        mgr.pwr_low = 0
+    if mgr.hysteresis.charge_time != datetime.max:
+        mgr.hysteresis.reset()
 
     # Stop charging devices
     for d in mgr.charge:
@@ -272,7 +352,7 @@ async def _distribute_power(
 
     # Charge hysteresis (cooldown before allowing charge)
     if is_charge and time:
-        setpoint = _apply_charge_hysteresis(mgr, setpoint, time)
+        setpoint = mgr.hysteresis.apply_charge_cooldown(setpoint, time, mgr.operationstate)
 
     setpoint = _cap_setpoint(setpoint, total_limit, is_charge, label)
     dev_start = _compute_wakeup_threshold(setpoint, optimal, is_charge, mgr)
@@ -302,7 +382,8 @@ async def _distribute_power(
             pwr = -d.pwr_produced
 
         # Per-device hysteresis (first device in multi-device setup)
-        pwr = _apply_device_hysteresis(mgr, d, pwr, is_charge, i, len(devices), label)
+        if len(devices) > 1 and i == 0:
+            pwr = mgr.hysteresis.apply_device_suppression(pwr, is_charge, d.charge_start if is_charge else d.discharge_start, d.charge_optimal if is_charge else d.discharge_optimal, d.state, label, d.name)
 
         _LOGGER.debug("%s: [%s/%s] %s soc=%s%% pwr_max=%s weight=%s remaining=%s pwr: weighted=%s clamped=%s final=%s",
                       label, i, len(devices), d.name, soc, d.pwr_max, device_weight, remaining, pwr_weighted, pwr_clamped, pwr)
@@ -338,26 +419,6 @@ def _compute_weights(devices: list, is_charge: bool) -> tuple[int, int, int]:
     return total_limit, total_weight, optimal
 
 
-def _apply_charge_hysteresis(mgr: ZendureManager, setpoint: int, time: datetime) -> int:
-    """Apply cooldown hysteresis before allowing charge. Returns adjusted setpoint."""
-    if mgr.charge_time > time:
-        if mgr.charge_time == datetime.max:
-            cooldown = (
-                SmartMode.HYSTERESIS_FAST_COOLDOWN
-                if (time - mgr.charge_last).total_seconds() > SmartMode.HYSTERESIS_LONG_COOLDOWN
-                else SmartMode.HYSTERESIS_SLOW_COOLDOWN
-            )
-            mgr.charge_time = time + timedelta(seconds=cooldown)
-            mgr.charge_last = mgr.charge_time
-            mgr.pwr_low = 0
-            _LOGGER.debug("Charge: hysteresis started, cooldown=%ss, charge_time=%s", cooldown, mgr.charge_time)
-        _LOGGER.debug("Charge: hysteresis active, setpoint %s => 0 (waiting until %s)", setpoint, mgr.charge_time)
-        return 0
-    else:
-        mgr.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
-        return setpoint
-
-
 def _cap_setpoint(setpoint: int, total_limit: int, is_charge: bool, label: str) -> int:
     """Cap setpoint to hardware limits."""
     if is_charge:
@@ -386,41 +447,6 @@ def _compute_device_power(remaining: int, device_weight: int, total_weight: int,
     return 0
 
 
-def _apply_device_hysteresis(mgr: ZendureManager, d: Any, pwr: int, is_charge: bool, index: int, device_count: int, label: str) -> int:
-    """Apply hysteresis for the first device in a multi-device setup."""
-    if device_count <= 1 or index != 0:
-        return pwr
-
-    pwr_before = pwr
-    if is_charge:
-        abs_start = abs(d.charge_start)
-        abs_optimal = abs(d.charge_optimal)
-        abs_pwr = abs(pwr)
-
-        delta = abs_start * SmartMode.HYSTERESIS_START_FACTOR - abs_pwr
-        if delta >= 0:
-            mgr.pwr_low = 0
-        else:
-            mgr.pwr_low += int(-delta)
-
-        if mgr.pwr_low > abs_optimal:
-            pwr = 0
-        _LOGGER.debug("%s: hysteresis[%s] abs_pwr=%s threshold=%s delta=%s pwr_low=%s/%s => pwr %s->%s",
-                      label, d.name, abs_pwr, abs_start * SmartMode.HYSTERESIS_START_FACTOR,
-                      delta, mgr.pwr_low, abs_optimal, pwr_before, pwr)
-    elif d.state != DeviceState.SOCFULL:
-        delta = d.discharge_start * SmartMode.HYSTERESIS_START_FACTOR - pwr
-        if delta <= 0:
-            mgr.pwr_low = 0
-        else:
-            mgr.pwr_low += int(delta)
-
-        if mgr.pwr_low > d.discharge_optimal:
-            pwr = 0
-
-    return pwr
-
-
 async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: bool) -> None:
     """Wake up idle devices if active devices are overloaded."""
     needs_wake = (dev_start < 0) if is_charge else (dev_start > 0)
@@ -443,4 +469,4 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
             await d.power_discharge(SmartMode.POWER_START)
             if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
                 break
-    mgr.pwr_low = 0
+    mgr.hysteresis.reset_accumulator()
