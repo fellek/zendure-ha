@@ -39,6 +39,7 @@ from .entity import EntityDevice
 from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
 from . import power_strategy
+from .power_strategy import HysteresisState
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureSensor
 from .power_port import DcSolarPowerPort, GridPowerPort, OffGridPowerPort, PowerPort
@@ -73,8 +74,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.charge: list[ZendureDevice] = []
         self.charge_limit = 0
         self.charge_optimal = 0
-        self.charge_time = datetime.max
-        self.charge_last = datetime.min
         self.charge_weight = 0
 
         self.discharge: list[ZendureDevice] = []
@@ -88,7 +87,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.idle_lvlmax = 0
         self.idle_lvlmin = 0
         self.produced = 0
-        self.pwr_low = 0
+
+        self.hysteresis = HysteresisState()
 
         self.device_ports: dict[str, list[PowerPort]] = {}
 
