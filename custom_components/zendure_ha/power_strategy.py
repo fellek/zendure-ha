@@ -11,6 +11,7 @@ from .const import DeviceState, ManagerMode, ManagerState, SmartMode
 from .power_port import DcSolarPowerPort, OffGridPowerPort
 
 if TYPE_CHECKING:
+    from .device import ZendureDevice
     from .manager import ZendureManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,6 +29,10 @@ class _DistDirection:
 CHARGE_DIR = _DistDirection("Charge", -1, True)
 DISCHARGE_DIR = _DistDirection("Discharge", +1, False)
 
+
+# ---------------------------------------------------------------------------
+#  Public API (called from manager.py)
+# ---------------------------------------------------------------------------
 
 def reset_power_state(mgr: ZendureManager) -> None:
     """Reset all power distribution lists and counters before recalculating."""
@@ -50,85 +55,126 @@ def reset_power_state(mgr: ZendureManager) -> None:
 
 async def classify_and_dispatch(mgr: ZendureManager, p1: int, isFast: bool, time: datetime) -> None:
     """Classify devices into charge/discharge/idle and dispatch to the active mode."""
-    availableKwh = 0
+    setpoint, available_kwh, power = await _classify_devices(mgr)
+    _update_group_limits(mgr)
+
+    mgr.power.update_value(power)
+    mgr.availableKwh.update_value(available_kwh)
+
+    if mgr.discharge_bypass > 0:
+        setpoint = max(0 if p1 >= 0 else setpoint - mgr.discharge_bypass, setpoint - mgr.discharge_bypass)
+
+    _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, mgr.produced)
+    await _dispatch_to_mode(mgr, p1, setpoint, isFast, time)
+
+
+# ---------------------------------------------------------------------------
+#  Phase 1: Classify devices into charge / discharge / idle
+# ---------------------------------------------------------------------------
+
+async def _classify_devices(mgr: ZendureManager) -> tuple[int, float, int]:
+    """Classify each device and return (setpoint, available_kwh, power)."""
+    available_kwh: float = 0
     setpoint = mgr.grid_port.power
     power = 0
 
+    # Build port lookup once instead of searching per iteration
+    offgrid_map: dict[str, OffGridPowerPort | None] = {}
+    solar_map: dict[str, DcSolarPowerPort | None] = {}
     for d in mgr.devices:
         ports = mgr.device_ports.get(d.deviceId, [])
-        offgrid_port = next((p for p in ports if isinstance(p, OffGridPowerPort)), None)
-        solar_port = next((p for p in ports if isinstance(p, DcSolarPowerPort)), None)
+        offgrid_map[d.deviceId] = next((p for p in ports if isinstance(p, OffGridPowerPort)), None)
+        solar_map[d.deviceId] = next((p for p in ports if isinstance(p, DcSolarPowerPort)), None)
 
-        if await d.power_get():
-            offgrid_power = offgrid_port.power if offgrid_port else 0
-            solar_power = solar_port.total_raw_solar if solar_port else 0
+    for d in mgr.devices:
+        if not await d.power_get():
+            continue
 
-            d.pwr_produced = min(0,
-                                 d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt - solar_power)
-            mgr.produced -= d.pwr_produced
+        offgrid_port = offgrid_map.get(d.deviceId)
+        solar_port = solar_map.get(d.deviceId)
+        offgrid_power = offgrid_port.power if offgrid_port else 0
+        solar_power = solar_port.total_raw_solar if solar_port else 0
 
-            # --- Classification (Charge / Discharge / Idle) ---
-            if d.state == DeviceState.SOCEMPTY and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
-                home = 0
-                mgr.idle.append(d)
-                mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
-                mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt)
-                _LOGGER.debug("Classify %s => IDLE (SOCEMPTY): homeInput=%s offgrid=%s batteryIn=%s state=%s soc=%s", d.name, d.homeInput.asInt, offgrid_power, d.batteryInput.asInt, d.state.name, d.electricLevel.asInt)
+        d.pwr_produced = min(0,
+                             d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt - solar_power)
+        mgr.produced -= d.pwr_produced
 
-            elif (home := -d.homeInput.asInt + offgrid_power) < 0:
-                mgr.charge.append(d)
-                setpoint += -d.homeInput.asInt
-                _LOGGER.debug("Classify %s => CHARGE: homeInput=%s offgrid=%s home=%s state=%s soc=%s setpoint_delta=%s", d.name, d.homeInput.asInt, offgrid_power, home, d.state.name, d.electricLevel.asInt, -d.homeInput.asInt)
+        home, setpoint_delta = _classify_single_device(mgr, d, offgrid_power)
+        setpoint += setpoint_delta
+        available_kwh += d.actualKwh
+        power += offgrid_power + home + d.pwr_produced
 
-            elif (home := d.homeOutput.asInt) > 0 or offgrid_power > 0:
-                mgr.discharge.append(d)
-                mgr.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
-                mgr.discharge_produced -= d.pwr_produced
+    return setpoint, available_kwh, power
 
-                net_battery = home - offgrid_power
 
-                if home == 0 and net_battery <= 0:
-                    _LOGGER.debug("Classify %s => DISCHARGE (WAKEUP): homeOutput=%s offgrid=%s state=%s soc=%s", d.name, d.homeOutput.asInt, offgrid_power, d.state.name, d.electricLevel.asInt)
-                else:
-                    setpoint += home
-                    _LOGGER.debug("Classify %s => DISCHARGE (ACTIVE): homeOutput=%s offgrid=%s state=%s soc=%s setpoint_delta=%s", d.name, d.homeOutput.asInt, offgrid_power, d.state.name, d.electricLevel.asInt, net_battery)
+def _classify_single_device(mgr: ZendureManager, d: ZendureDevice, offgrid_power: int) -> tuple[int, int]:
+    """Classify one device into charge/discharge/idle. Returns (home, setpoint_delta)."""
+    # SOCEMPTY and fully idle
+    if d.state == DeviceState.SOCEMPTY and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
+        mgr.idle.append(d)
+        mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
+        mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt)
+        _LOGGER.debug("Classify %s => IDLE (SOCEMPTY): homeInput=%s offgrid=%s batteryIn=%s state=%s soc=%s",
+                       d.name, d.homeInput.asInt, offgrid_power, d.batteryInput.asInt, d.state.name, d.electricLevel.asInt)
+        return 0, 0
 
-            else:
-                mgr.idle.append(d)
-                mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
-                mgr.idle_lvlmin = min(mgr.idle_lvlmin,
-                                       d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
-                _LOGGER.debug("Classify %s => IDLE: homeInput=%s homeOutput=%s offgrid=%s state=%s soc=%s", d.name,
-                              d.homeInput.asInt, d.homeOutput.asInt, offgrid_power, d.state.name,
-                              d.electricLevel.asInt)
+    # Charging (home input exceeds offgrid)
+    home = -d.homeInput.asInt + offgrid_power
+    if home < 0:
+        mgr.charge.append(d)
+        _LOGGER.debug("Classify %s => CHARGE: homeInput=%s offgrid=%s home=%s state=%s soc=%s setpoint_delta=%s",
+                       d.name, d.homeInput.asInt, offgrid_power, home, d.state.name, d.electricLevel.asInt, -d.homeInput.asInt)
+        return home, -d.homeInput.asInt
 
-            availableKwh += d.actualKwh
-            power += offgrid_power + home + d.pwr_produced
+    # Discharging (home output or offgrid active)
+    home = d.homeOutput.asInt
+    if home > 0 or offgrid_power > 0:
+        mgr.discharge.append(d)
+        mgr.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
+        mgr.discharge_produced -= d.pwr_produced
 
-    # Limits für Gruppen berechnen (update pwr_max)
-    charge_groups = {d.fuseGrp for d in mgr.charge}
-    for fg in charge_groups:
+        net_battery = home - offgrid_power
+        if home == 0 and net_battery <= 0:
+            _LOGGER.debug("Classify %s => DISCHARGE (WAKEUP): homeOutput=%s offgrid=%s state=%s soc=%s",
+                           d.name, d.homeOutput.asInt, offgrid_power, d.state.name, d.electricLevel.asInt)
+            return home, 0
+        else:
+            _LOGGER.debug("Classify %s => DISCHARGE (ACTIVE): homeOutput=%s offgrid=%s state=%s soc=%s setpoint_delta=%s",
+                           d.name, d.homeOutput.asInt, offgrid_power, d.state.name, d.electricLevel.asInt, net_battery)
+            return home, home
+
+    # Idle
+    mgr.idle.append(d)
+    mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
+    mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
+    _LOGGER.debug("Classify %s => IDLE: homeInput=%s homeOutput=%s offgrid=%s state=%s soc=%s",
+                   d.name, d.homeInput.asInt, d.homeOutput.asInt, offgrid_power, d.state.name, d.electricLevel.asInt)
+    return 0, 0
+
+
+# ---------------------------------------------------------------------------
+#  Phase 2: Update FuseGroup limits
+# ---------------------------------------------------------------------------
+
+def _update_group_limits(mgr: ZendureManager) -> None:
+    """Compute per-device pwr_max via FuseGroup and update global aggregates."""
+    for fg in {d.fuseGrp for d in mgr.charge}:
         fg.update_charge_limits()
-
-    discharge_groups = {d.fuseGrp for d in mgr.discharge}
-    for fg in discharge_groups:
+    for fg in {d.fuseGrp for d in mgr.discharge}:
         fg.update_discharge_limits()
 
-    # Globale Limits updaten (für Logging/Status)
     mgr.charge_limit = sum(d.pwr_max for d in mgr.charge)
     mgr.discharge_limit = sum(d.pwr_max for d in mgr.discharge)
     mgr.charge_optimal = sum(d.charge_optimal for d in mgr.charge)
     mgr.discharge_optimal = sum(d.discharge_optimal for d in mgr.discharge)
 
-    # Update the power entities
-    mgr.power.update_value(power)
-    mgr.availableKwh.update_value(availableKwh)
 
-    if mgr.discharge_bypass > 0:
-        setpoint = max(0 if p1 >= 0 else setpoint - mgr.discharge_bypass, setpoint - mgr.discharge_bypass)
+# ---------------------------------------------------------------------------
+#  Phase 3: Dispatch to mode handler
+# ---------------------------------------------------------------------------
 
-    # Dispatch to mode handler
-    _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, mgr.produced)
+async def _dispatch_to_mode(mgr: ZendureManager, p1: int, setpoint: int, isFast: bool, time: datetime) -> None:
+    """Dispatch to the active mode handler."""
     match mgr.operation:
         case ManagerMode.MATCHING:
             if setpoint < 0:
@@ -159,186 +205,14 @@ async def classify_and_dispatch(mgr: ZendureManager, p1: int, isFast: bool, time
             mgr.operationstate.update_value(ManagerState.OFF.value)
 
 
-async def _distribute_power(
-    mgr: ZendureManager,
-    devices: list,
-    setpoint: int,
-    direction: _DistDirection,
-    time: datetime | None = None,
-) -> None:
-    """
-    Core distribution logic.
-    Calculates local limits/weights and distributes power proportionally.
-    """
-    is_charge = direction.sign == -1
-    label = direction.label
-
-    # 1. Calculate local aggregates based on the ACTUAL device list provided
-    # (This decouples the logic from the global mgr state)
-    total_limit = sum(d.pwr_max for d in devices)
-    total_weight = sum(d.pwr_max * (100 - d.electricLevel.asInt) for d in devices) if is_charge else \
-                   sum(d.pwr_max * d.electricLevel.asInt for d in devices)
-    optimal = sum(d.charge_optimal for d in devices) if is_charge else \
-              sum(d.discharge_optimal for d in devices)
-
-    # 2. Hysteresis Logic (Charge only)
-    if is_charge and time:
-        if mgr.charge_time > time:
-            if mgr.charge_time == datetime.max:
-                cooldown = (
-                    SmartMode.HYSTERESIS_FAST_COOLDOWN
-                    if (time - mgr.charge_last).total_seconds() > SmartMode.HYSTERESIS_LONG_COOLDOWN
-                    else SmartMode.HYSTERESIS_SLOW_COOLDOWN
-                )
-                mgr.charge_time = time + timedelta(seconds=cooldown)
-                mgr.charge_last = mgr.charge_time
-                mgr.pwr_low = 0
-                _LOGGER.debug("Charge: hysteresis started, cooldown=%ss, charge_time=%s", cooldown, mgr.charge_time)
-            _LOGGER.debug("Charge: hysteresis active, setpoint %s => 0 (waiting until %s)", setpoint, mgr.charge_time)
-            setpoint = 0
-        else:
-            mgr.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
-
-    # 3. Cap Setpoint to Hardware Limits
-    if is_charge:
-        # Charge limit is positive magnitude, setpoint is negative
-        # e.g. limit=2000, setpoint=-3000 -> max(-3000, -2000) = -2000
-        capped = max(setpoint, -total_limit)
-        if capped != setpoint:
-            _LOGGER.debug("Charge: setpoint capped by charge_limit: %s => %s (limit=%s)", setpoint, capped, total_limit)
-        setpoint = capped
-    else:
-        # Discharge
-        capped = min(setpoint, total_limit)
-        if capped != setpoint:
-            _LOGGER.debug("Discharge: setpoint capped by discharge_limit: %s => %s (limit=%s)", setpoint, capped, total_limit)
-        setpoint = capped
-
-    # 4. Compute dev_start (wake-up threshold)
-    if is_charge:
-        dev_start = min(0, setpoint - optimal * SmartMode.WAKEUP_CAPACITY_FACTOR) if setpoint < -SmartMode.POWER_START else 0
-    else:
-        dev_start = max(0, setpoint - optimal * SmartMode.WAKEUP_CAPACITY_FACTOR - mgr.discharge_produced) if setpoint > SmartMode.POWER_START else 0
-
-    remaining_setpoint = setpoint
-    _LOGGER.debug(
-        "%s: distributing setpoint=%s across %s devices, dev_start=%s, weight=%s",
-        label, setpoint, len(devices), dev_start, total_weight,
-    )
-
-    # 5. Distribution Loop
-    for i, d in enumerate(sorted(devices, key=lambda d: d.electricLevel.asInt, reverse=direction.sort_high_first)):
-        soc = d.electricLevel.asInt
-
-        # Weight calculation
-        device_weight = d.pwr_max * (100 - soc) if is_charge else d.pwr_max * soc
-
-        # Proportional power
-        if total_weight != 0:
-            pwr = int(remaining_setpoint * device_weight / total_weight)
-        elif not is_charge and len(devices) > i:
-            pwr = int(remaining_setpoint / (len(devices) - i))
-        else:
-            pwr = 0
-
-        # SOCFULL solar passthrough (discharge only)
-        if not is_charge and pwr < -d.pwr_produced and d.state == DeviceState.SOCFULL:
-            pwr = -d.pwr_produced
-
-        total_weight -= device_weight
-        pwr_weighted = pwr
-
-        # Clamping
-        if is_charge:
-            pwr = max(pwr, remaining_setpoint, d.pwr_max)
-        else:
-            pwr = min(pwr, d.pwr_max)
-            pwr = min(pwr, remaining_setpoint)
-
-        pwr_clamped = pwr
-
-        # Hysteresis logic for the first device in a multi-device setup
-        pwr_before_hyst = pwr
-        if len(devices) > 1 and i == 0:
-            if is_charge:
-                abs_start = abs(d.charge_start)
-                abs_optimal = abs(d.charge_optimal)
-                abs_pwr = abs(pwr)
-
-                delta = abs_start * SmartMode.HYSTERESIS_START_FACTOR - abs_pwr
-                if delta >= 0:
-                    mgr.pwr_low = 0
-                else:
-                    mgr.pwr_low += int(-delta)
-
-                if mgr.pwr_low > abs_optimal:
-                    pwr = 0
-                _LOGGER.debug(
-                    "%s: hysteresis[%s] abs_pwr=%s threshold=%s delta=%s pwr_low=%s/%s => pwr %s->%s",
-                    label, d.name, abs_pwr, abs_start * SmartMode.HYSTERESIS_START_FACTOR,
-                    delta, mgr.pwr_low, abs_optimal, pwr_before_hyst, pwr,
-                )
-            elif d.state != DeviceState.SOCFULL:
-                delta = d.discharge_start * SmartMode.HYSTERESIS_START_FACTOR - pwr
-                if delta <= 0:
-                    mgr.pwr_low = 0
-                else:
-                    mgr.pwr_low += int(delta)
-
-                if mgr.pwr_low > d.discharge_optimal:
-                    pwr = 0
-
-        _LOGGER.debug(
-            "%s: [%s/%s] %s soc=%s%% pwr_max=%s weight=%s remaining=%s pwr: weighted=%s clamped=%s final=%s",
-            label, i, len(devices), d.name, soc, d.pwr_max, device_weight,
-            remaining_setpoint, pwr_weighted, pwr_clamped, pwr,
-        )
-
-        # Apply power
-        if is_charge:
-            actual_pwr = await d.power_charge(pwr)
-        else:
-            actual_pwr = await d.power_discharge(pwr)
-
-        remaining_setpoint -= actual_pwr
-
-        # dev_start tracking
-        if is_charge:
-            dev_start += -1 if pwr != 0 and soc > mgr.idle_lvlmin + SmartMode.SOC_IDLE_BUFFER else 0
-        else:
-            dev_start += 1 if pwr != 0 and soc + 3 < mgr.idle_lvlmax else 0
-
-        _LOGGER.debug("%s: [%s] %s actual=%s remaining_after=%s", label, i, d.name, actual_pwr, remaining_setpoint)
-
-    # --- Idle wake-up ---
-    needs_wake = (dev_start < 0) if is_charge else (dev_start > 0)
-    _LOGGER.debug(
-        "%s: done distributing, remaining=%s dev_start=%s idle_count=%s",
-        label, remaining_setpoint, dev_start, len(mgr.idle),
-    )
-
-    if needs_wake and len(mgr.idle) > 0:
-        mgr.idle.sort(key=lambda d: d.electricLevel.asInt, reverse=not is_charge)
-        for d in mgr.idle:
-            if is_charge:
-                await d.power_charge(
-                    -SmartMode.POWER_START - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid))
-                if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
-                    break
-            else:
-                if d.state == DeviceState.SOCEMPTY:
-                    continue
-                await d.power_discharge(SmartMode.POWER_START)
-                if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
-                    break
-        mgr.pwr_low = 0
-
+# ---------------------------------------------------------------------------
+#  Charge / Discharge entry points
+# ---------------------------------------------------------------------------
 
 async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) -> None:
     """Prepare charge list and delegate distribution."""
     _LOGGER.info("Charge => setpoint %sW, devices=%s", setpoint, len(mgr.charge))
 
-    # Prepare list: Start with classified charge devices
     active_devices = list(mgr.charge)
 
     # Promote chargeable discharge devices
@@ -346,16 +220,13 @@ async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) 
         if d.state != DeviceState.SOCFULL:
             d.pwr_max = max(d.fuseGrp.minpower, d.charge_limit)
             active_devices.append(d)
-            _LOGGER.debug(
-                "Charge: promote discharge %s => charge (pwr_max=%s, charge_limit=%s, soc=%s)",
-                d.name, d.pwr_max, d.charge_limit, d.electricLevel.asInt,
-            )
+            _LOGGER.debug("Charge: promote discharge %s => charge (pwr_max=%s, charge_limit=%s, soc=%s)",
+                           d.name, d.pwr_max, d.charge_limit, d.electricLevel.asInt)
         else:
             stop_pwr = 0 if d.pwr_offgrid == 0 else -SmartMode.POWER_IDLE_OFFSET
             _LOGGER.debug("Charge: stop discharge %s => power_charge(%s) [SOCFULL, offgrid=%s]", d.name, stop_pwr, d.pwr_offgrid)
             await d.power_charge(stop_pwr)
 
-    # Delegate to core distributor
     await _distribute_power(mgr, active_devices, setpoint, CHARGE_DIR, time)
 
 
@@ -365,7 +236,7 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int) -> None:
     mgr.operationstate.update_value(
         ManagerState.DISCHARGE.value if setpoint > 0 and mgr.discharge else ManagerState.IDLE.value)
 
-    # Reset hysteria time (belongs to charge cycle, but reset here on switch)
+    # Reset charge hysteresis on mode switch
     if mgr.charge_time != datetime.max:
         mgr.charge_time = datetime.max
         mgr.pwr_low = 0
@@ -377,9 +248,199 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int) -> None:
     # Determine if we only need to pass through solar power
     solaronly = mgr.discharge_produced >= setpoint
     limit = mgr.discharge_produced if solaronly else mgr.discharge_limit
-
-    # Cap setpoint to available limit
     setpoint = min(setpoint, limit)
 
-    # Delegate to core distributor
     await _distribute_power(mgr, mgr.discharge, setpoint, DISCHARGE_DIR)
+
+
+# ---------------------------------------------------------------------------
+#  Core distribution logic
+# ---------------------------------------------------------------------------
+
+async def _distribute_power(
+    mgr: ZendureManager,
+    devices: list,
+    setpoint: int,
+    direction: _DistDirection,
+    time: datetime | None = None,
+) -> None:
+    """Distribute power across devices proportionally by weight."""
+    is_charge = direction.sign == -1
+    label = direction.label
+
+    total_limit, total_weight, optimal = _compute_weights(devices, is_charge)
+
+    # Charge hysteresis (cooldown before allowing charge)
+    if is_charge and time:
+        setpoint = _apply_charge_hysteresis(mgr, setpoint, time)
+
+    setpoint = _cap_setpoint(setpoint, total_limit, is_charge, label)
+    dev_start = _compute_wakeup_threshold(setpoint, optimal, is_charge, mgr)
+
+    remaining = setpoint
+    _LOGGER.debug("%s: distributing setpoint=%s across %s devices, dev_start=%s, weight=%s",
+                  label, setpoint, len(devices), dev_start, total_weight)
+
+    # Distribution loop
+    for i, d in enumerate(sorted(devices, key=lambda d: d.electricLevel.asInt, reverse=direction.sort_high_first)):
+        soc = d.electricLevel.asInt
+        device_weight = d.pwr_max * (100 - soc) if is_charge else d.pwr_max * soc
+
+        pwr = _compute_device_power(remaining, device_weight, total_weight, is_charge, devices, i, d)
+        total_weight -= device_weight
+        pwr_weighted = pwr
+
+        # Clamping
+        if is_charge:
+            pwr = max(pwr, remaining, d.pwr_max)
+        else:
+            pwr = min(pwr, d.pwr_max, remaining)
+        pwr_clamped = pwr
+
+        # SOCFULL solar passthrough (discharge only)
+        if not is_charge and pwr_weighted < -d.pwr_produced and d.state == DeviceState.SOCFULL:
+            pwr = -d.pwr_produced
+
+        # Per-device hysteresis (first device in multi-device setup)
+        pwr = _apply_device_hysteresis(mgr, d, pwr, is_charge, i, len(devices), label)
+
+        _LOGGER.debug("%s: [%s/%s] %s soc=%s%% pwr_max=%s weight=%s remaining=%s pwr: weighted=%s clamped=%s final=%s",
+                      label, i, len(devices), d.name, soc, d.pwr_max, device_weight, remaining, pwr_weighted, pwr_clamped, pwr)
+
+        # Apply power
+        actual_pwr = await d.power_charge(pwr) if is_charge else await d.power_discharge(pwr)
+        remaining -= actual_pwr
+
+        # Wake-up tracking
+        if is_charge:
+            dev_start += -1 if pwr != 0 and soc > mgr.idle_lvlmin + SmartMode.SOC_IDLE_BUFFER else 0
+        else:
+            dev_start += 1 if pwr != 0 and soc + SmartMode.SOC_IDLE_BUFFER < mgr.idle_lvlmax else 0
+
+        _LOGGER.debug("%s: [%s] %s actual=%s remaining_after=%s", label, i, d.name, actual_pwr, remaining)
+
+    await _wake_idle_devices(mgr, dev_start, is_charge)
+
+
+# ---------------------------------------------------------------------------
+#  Distribution helpers
+# ---------------------------------------------------------------------------
+
+def _compute_weights(devices: list, is_charge: bool) -> tuple[int, int, int]:
+    """Compute total_limit, total_weight and optimal for a device list."""
+    total_limit = sum(d.pwr_max for d in devices)
+    if is_charge:
+        total_weight = sum(d.pwr_max * (100 - d.electricLevel.asInt) for d in devices)
+        optimal = sum(d.charge_optimal for d in devices)
+    else:
+        total_weight = sum(d.pwr_max * d.electricLevel.asInt for d in devices)
+        optimal = sum(d.discharge_optimal for d in devices)
+    return total_limit, total_weight, optimal
+
+
+def _apply_charge_hysteresis(mgr: ZendureManager, setpoint: int, time: datetime) -> int:
+    """Apply cooldown hysteresis before allowing charge. Returns adjusted setpoint."""
+    if mgr.charge_time > time:
+        if mgr.charge_time == datetime.max:
+            cooldown = (
+                SmartMode.HYSTERESIS_FAST_COOLDOWN
+                if (time - mgr.charge_last).total_seconds() > SmartMode.HYSTERESIS_LONG_COOLDOWN
+                else SmartMode.HYSTERESIS_SLOW_COOLDOWN
+            )
+            mgr.charge_time = time + timedelta(seconds=cooldown)
+            mgr.charge_last = mgr.charge_time
+            mgr.pwr_low = 0
+            _LOGGER.debug("Charge: hysteresis started, cooldown=%ss, charge_time=%s", cooldown, mgr.charge_time)
+        _LOGGER.debug("Charge: hysteresis active, setpoint %s => 0 (waiting until %s)", setpoint, mgr.charge_time)
+        return 0
+    else:
+        mgr.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
+        return setpoint
+
+
+def _cap_setpoint(setpoint: int, total_limit: int, is_charge: bool, label: str) -> int:
+    """Cap setpoint to hardware limits."""
+    if is_charge:
+        capped = max(setpoint, -total_limit)
+    else:
+        capped = min(setpoint, total_limit)
+    if capped != setpoint:
+        _LOGGER.debug("%s: setpoint capped by limit: %s => %s (limit=%s)", label, setpoint, capped, total_limit)
+    return capped
+
+
+def _compute_wakeup_threshold(setpoint: int, optimal: int, is_charge: bool, mgr: ZendureManager) -> int:
+    """Compute the dev_start threshold for waking idle devices."""
+    if is_charge:
+        return min(0, setpoint - optimal * SmartMode.WAKEUP_CAPACITY_FACTOR) if setpoint < -SmartMode.POWER_START else 0
+    else:
+        return max(0, setpoint - optimal * SmartMode.WAKEUP_CAPACITY_FACTOR - mgr.discharge_produced) if setpoint > SmartMode.POWER_START else 0
+
+
+def _compute_device_power(remaining: int, device_weight: int, total_weight: int, is_charge: bool, devices: list, index: int, d: Any) -> int:
+    """Compute proportional power share for one device."""
+    if total_weight != 0:
+        return int(remaining * device_weight / total_weight)
+    elif not is_charge and len(devices) > index:
+        return int(remaining / (len(devices) - index))
+    return 0
+
+
+def _apply_device_hysteresis(mgr: ZendureManager, d: Any, pwr: int, is_charge: bool, index: int, device_count: int, label: str) -> int:
+    """Apply hysteresis for the first device in a multi-device setup."""
+    if device_count <= 1 or index != 0:
+        return pwr
+
+    pwr_before = pwr
+    if is_charge:
+        abs_start = abs(d.charge_start)
+        abs_optimal = abs(d.charge_optimal)
+        abs_pwr = abs(pwr)
+
+        delta = abs_start * SmartMode.HYSTERESIS_START_FACTOR - abs_pwr
+        if delta >= 0:
+            mgr.pwr_low = 0
+        else:
+            mgr.pwr_low += int(-delta)
+
+        if mgr.pwr_low > abs_optimal:
+            pwr = 0
+        _LOGGER.debug("%s: hysteresis[%s] abs_pwr=%s threshold=%s delta=%s pwr_low=%s/%s => pwr %s->%s",
+                      label, d.name, abs_pwr, abs_start * SmartMode.HYSTERESIS_START_FACTOR,
+                      delta, mgr.pwr_low, abs_optimal, pwr_before, pwr)
+    elif d.state != DeviceState.SOCFULL:
+        delta = d.discharge_start * SmartMode.HYSTERESIS_START_FACTOR - pwr
+        if delta <= 0:
+            mgr.pwr_low = 0
+        else:
+            mgr.pwr_low += int(delta)
+
+        if mgr.pwr_low > d.discharge_optimal:
+            pwr = 0
+
+    return pwr
+
+
+async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: bool) -> None:
+    """Wake up idle devices if active devices are overloaded."""
+    needs_wake = (dev_start < 0) if is_charge else (dev_start > 0)
+    label = "Charge" if is_charge else "Discharge"
+    _LOGGER.debug("%s: done distributing, dev_start=%s idle_count=%s", label, dev_start, len(mgr.idle))
+
+    if not needs_wake or len(mgr.idle) == 0:
+        return
+
+    mgr.idle.sort(key=lambda d: d.electricLevel.asInt, reverse=not is_charge)
+    for d in mgr.idle:
+        if is_charge:
+            await d.power_charge(
+                -SmartMode.POWER_START - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid))
+            if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
+                break
+        else:
+            if d.state == DeviceState.SOCEMPTY:
+                continue
+            await d.power_discharge(SmartMode.POWER_START)
+            if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
+                break
+    mgr.pwr_low = 0
