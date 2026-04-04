@@ -152,74 +152,78 @@ Hier wird der Code durch die Ports endlich lesbar. Ersetze die relevante Schleif
 
 ```python
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
-        """Return the distribution setpoint."""
-        availableKwh = 0
-        # 1. Basis-Setpoint ist immer der aktuelle Netz-Bezug/-Export
-        setpoint = self.grid_port.power  
-        power = 0
 
-        for d in self.devices:
-            # 2. Hole die modularen Ports für dieses spezifische Gerät
-            ports = self.device_ports.get(d.deviceId, [])
-            offgrid_port = next((p for p in ports if isinstance(p, OffGridPowerPort)), None)
-            solar_port = next((p for p in ports if isinstance(p, DcSolarPowerPort)), None)
 
-            if await d.power_get():
-                # 3. Entkoppelte Berechnung der unkontrollierten Einflüsse
-                offgrid_power = offgrid_port.power if offgrid_port else 0
-                solar_power = solar_port.raw_solar_input if solar_port else 0
-                
-                # pwr_produced Logik für SOCFULL-Bypass (braucht den reinen Solarwert)
-                d.pwr_produced = min(0, d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt - solar_power)
-                self.produced -= d.pwr_produced
+    """Return the distribution setpoint."""
+availableKwh = 0
+# 1. Basis-Setpoint ist immer der aktuelle Netz-Bezug/-Export
+setpoint = self.grid_port.power
+power = 0
 
-                # --- Klassifizierung (Charge / Discharge / Idle) ---
-                if d.state == DeviceState.SOCEMPTY and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
-                    home = 0
-                    self.idle.append(d)
-                    self.idle_lvlmax = max(self.idle_lvlmax, d.electricLevel.asInt)
-                    self.idle_lvlmin = min(self.idle_lvlmin, d.electricLevel.asInt)
-                    
-                elif (home := -d.homeInput.asInt + offgrid_power) < 0:
-                    self.charge.append(d)
-                    self.charge_limit += d.fuseGrp.charge_limit(d)
-                    self.charge_optimal += d.charge_optimal
-                    self.charge_weight += d.pwr_max * (100 - d.electricLevel.asInt)
-                    setpoint += -d.homeInput.asInt
-                    
-                elif (home := d.homeOutput.asInt) > 0 or offgrid_power > 0:
-                    self.discharge.append(d)
-                    self.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
-                    self.discharge_limit += d.fuseGrp.discharge_limit(d)
-                    self.discharge_optimal += d.discharge_optimal
-                    self.discharge_produced -= d.pwr_produced
-                    self.discharge_weight += d.pwr_max * d.electricLevel.asInt
+for d in self.devices:
+    # 2. Hole die modularen Ports für dieses spezifische Gerät
+    ports = self.device_ports.get(d.deviceId, [])
+    offgrid_port = next((p for p in ports if isinstance(p, OffGridPowerPort)), None)
+    solar_port = next((p for p in ports if isinstance(p, DcSolarPowerPort)), None)
 
-                    # NEUE MATHEMATIK FÜR AC-WECHSELRICHTER (SolarFlow 2400 AC)
-                    net_battery = home - offgrid_power
+    if await d.power_get():
+        # 3. Entkoppelte Berechnung der unkontrollierten Einflüsse
+        offgrid_power = offgrid_port.power if offgrid_port else 0
+        solar_power = solar_port.raw_solar_input if solar_port else 0
 
-                    if home == 0 and net_battery <= 0:
-                        pass # WAKEUP Logik...
-                    else:
-                        setpoint += home
-                else:
-                    self.idle.append(d)
-                    self.idle_lvlmax = max(self.idle_lvlmax, d.electricLevel.asInt)
-                    self.idle_lvlmin = min(self.idle_lvlmin, d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
+        # pwr_produced Logik für SOCFULL-Bypass (braucht den reinen Solarwert)
+        d.pwr_produced = min(0,
+                             d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt - solar_power)
+        self.produced -= d.pwr_produced
 
-                availableKwh += d.actualKwh
-                power += offgrid_power + home + d.pwr_produced
+        # --- Klassifizierung (Charge / Discharge / Idle) ---
+        if d.state == DeviceState.SOCEMPTY and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
+            home = 0
+            self.idle.append(d)
+            self.idle_lvlmax = max(self.idle_lvlmax, d.electricLevel.asInt)
+            self.idle_lvlmin = min(self.idle_lvlmin, d.electricLevel.asInt)
 
-        # ... [Rest der powerChanged Methode bleibt exakt gleich!] ...
-        self.power.update_value(power)
-        self.availableKwh.update_value(availableKwh)
+        elif (home := -d.homeInput.asInt + offgrid_power) < 0:
+            self.charge.append(d)
+            self.update_charge_limit += d.fuseGrp.update_charge_limit()
+            self.charge_optimal += d.charge_optimal
+            self.charge_weight += d.pwr_max * (100 - d.electricLevel.asInt)
+            setpoint += -d.homeInput.asInt
 
-        if self.discharge_bypass > 0:
-            setpoint = max(0 if p1 >= 0 else setpoint - self.discharge_bypass, setpoint - self.discharge_bypass)
+        elif (home := d.homeOutput.asInt) > 0 or offgrid_power > 0:
+            self.discharge.append(d)
+            self.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
+            self.discharge_limit += d.fuseGrp.discharge_limit(d)
+            self.discharge_optimal += d.discharge_optimal
+            self.discharge_produced -= d.pwr_produced
+            self.discharge_weight += d.pwr_max * d.electricLevel.asInt
 
-        _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
-        
-        # ... [Match/Case Block für ManagerMode bleibt gleich] ...
+            # NEUE MATHEMATIK FÜR AC-WECHSELRICHTER (SolarFlow 2400 AC)
+            net_battery = home - offgrid_power
+
+            if home == 0 and net_battery <= 0:
+                pass  # WAKEUP Logik...
+            else:
+                setpoint += home
+        else:
+            self.idle.append(d)
+            self.idle_lvlmax = max(self.idle_lvlmax, d.electricLevel.asInt)
+            self.idle_lvlmin = min(self.idle_lvlmin,
+                                   d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
+
+        availableKwh += d.actualKwh
+        power += offgrid_power + home + d.pwr_produced
+
+# ... [Rest der powerChanged Methode bleibt exakt gleich!] ...
+self.power.update_value(power)
+self.availableKwh.update_value(availableKwh)
+
+if self.discharge_bypass > 0:
+    setpoint = max(0 if p1 >= 0 else setpoint - self.discharge_bypass, setpoint - self.discharge_bypass)
+
+_LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
+
+# ... [Match/Case Block für ManagerMode bleibt gleich] ...
 ```
 
 #### D) P1 Update anpassen
