@@ -80,10 +80,7 @@ class ZendureDevice(EntityDevice):
         self.state: DeviceState = DeviceState.OFFLINE
 
         self.create_entities()
-        # --- HIER EINFÜGEN ---
-        self.ports: list[PowerPort] = []      # Initialisiere die leere Liste
-        self._init_power_ports()              # Befülle die Liste mit den Ports
-        # ---------------------
+        self.ports: list[PowerPort] = []      # Wird von jeder Subklasse befüllt
 
     def create_entities(self) -> None:
         """Create the device entities."""
@@ -136,12 +133,14 @@ class ZendureDevice(EntityDevice):
                 extra_sensor = ZendureSensor(self, f"solarInputPower_{i}", None, "W", "power", "measurement", icon="mdi:solar-panel")
                 solar_sensors.append(extra_sensor)
             self.solarPort = DcSolarPowerPort(self, solar_sensors)
+            self.ports.append(self.solarPort)
 
         # 2. Offgrid Port: Wird IGNORIERT, wenn _has_offgrid == False
         if self._has_offgrid:
             self.offGrid = ZendureSensor(self, "gridOffPower", None, "W", "power", "measurement")
             self.aggrOffGrid = ZendureRestoreSensor(self, "aggrGridOffPower", None, "kWh", "energy", "total_increasing", 2)
             self.offgridPort = OffGridPowerPort(self)
+            self.ports.append(self.offgridPort)
 
     def setLimits(self, charge: int, discharge: int) -> None:
         """Set the device limits."""

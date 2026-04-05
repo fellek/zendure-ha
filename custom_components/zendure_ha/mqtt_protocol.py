@@ -162,6 +162,8 @@ def entity_update_side_effects(device: ZendureDevice, key: Any, value: Any) -> N
             case "outputHomePower":
                 device.aggrHomeOut.aggregate(dt_util.now(), value)
             case "gridOffPower":
+                if hasattr(device, 'offGrid'):
+                    device.offGrid.update_value(value)
                 if hasattr(device, 'aggrOffGrid'):
                     device.aggrOffGrid.aggregate(dt_util.now(), value)
             case "inverseMaxPower":

@@ -38,10 +38,6 @@ class SolarFlow800Pro(ZendureZenSdk):
         super().__init__(hass, deviceId, name, definition["productModel"], definition, parent)
         self.setLimits(-1000, 800)
         self.maxSolar = -1200
-
-        # --- NEU: Port-Konfiguration ---
         self.pv_port_count = 1
-        self._has_offgrid = True  # Aktiviert Offgrid-Port und generiert Sensoren automatisch
-        # ------------------------------
-
+        self._has_offgrid = True
         self._init_power_ports()

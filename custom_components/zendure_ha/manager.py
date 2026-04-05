@@ -366,20 +366,23 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         _LOGGER.info("Update operation: %s from: %s", operation, self.operation)
 
         self.operation = operation
-        if self.p1meterEvent is not None:
-            if operation != ManagerMode.OFF and (len(self.devices) == 0 or all(not d.online for d in self.devices)):
-                _LOGGER.warning("No devices online, not possible to start the operation")
-                persistent_notification.async_create(self.hass, "No devices online, not possible to start the operation", "Zendure", "zendure_ha")
-                return
 
-            match self.operation:
-                case ManagerMode.OFF:
-                    if len(self.devices) > 0:
-                        for d in self.devices:
-                            await d.power_off()
-                case _:
-                    # Trigger immediate power distribution so the new mode
-                    # takes effect without waiting for the next P1 event.
+        # Check if devices are available (applies even without p1meterEvent during restore)
+        if operation != ManagerMode.OFF and (len(self.devices) == 0 or all(not d.online for d in self.devices)):
+            _LOGGER.warning("No devices online, not possible to start the operation")
+            persistent_notification.async_create(self.hass, "No devices online, not possible to start the operation", "Zendure", "zendure_ha")
+            return
+
+        match self.operation:
+            case ManagerMode.OFF:
+                if len(self.devices) > 0:
+                    for d in self.devices:
+                        await d.power_off()
+            case _:
+                # Trigger immediate power distribution so the new mode
+                # takes effect without waiting for the next P1 event.
+                # (Only if p1meterEvent is registered, otherwise store mode for later)
+                if self.p1meterEvent is not None:
                     try:
                         self._reset_power_state()
                         p1 = 0
