@@ -395,7 +395,7 @@ async def _distribute_power(
         # @todo: how does it work with multiple devices?
         # --- NEU: Min-SoC Schutz bei Entladung ---
         if not is_charge:
-            min_soc_limit = d.minSoc.asInt + SmartMode.DISCHARGE_SOC_BUFFER
+            min_soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
             if d.electricLevel.asInt <= min_soc_limit:
                 _LOGGER.warning("%s: Discharge blocked! SoC=%s%% too close to minSoc=%s%%",
                               d.name, d.electricLevel.asInt, min_soc_limit)
@@ -481,7 +481,7 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
                 continue
 
             # --- NEU: Min-SoC Schutz auch beim Aufwecken beachten ---
-            min_soc_limit = d.minSoc.asInt + SmartMode.DISCHARGE_SOC_BUFFER
+            min_soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
             if d.electricLevel.asInt <= min_soc_limit:
                 _LOGGER.debug("Discharge Wakeup blocked: %s SoC=%s%% at minSoc limit", d.name, d.electricLevel.asInt)
                 continue
