@@ -57,8 +57,8 @@ class SmartMode:
     ZENSDK = 2
     CONNECTED = 10
 
-    TIMEFAST = 2.2  # Fast update interval after significant change
-    TIMEZERO = 4  # Normal update interval
+    TIMEFAST = 1.5  # default: 2.2 Fast update interval after significant change
+    TIMEZERO = 4  # default: 4 Normal update interval
 
     # Standard deviation thresholds for detecting significant changes
     P1_STDDEV_FACTOR = 3.5  # Multiplier for P1 meter stddev calculation
@@ -70,7 +70,7 @@ class SmartMode:
     HEMSOFF_TIMEOUT = 60  # Seconds before HEMS state is set to OFF if no updates are received
 
     POWER_START = 50  # Minimum Power (W) for starting a device
-    POWER_TOLERANCE = 5  # Device-level power tolerance (W) before updating
+    POWER_TOLERANCE = 10  # Device-level power tolerance (W) before updating
 
     # ====================================================================
     # NEU: Power Distribution & Hysteresis Konstanten
@@ -98,11 +98,11 @@ class SmartMode:
     # damit das System beim nächsten Überschuss "schnell" (FAST_COOLDOWN) wieder anfängt zu laden.
     # Wenn weniger Zeit vergangen ist, wird der lange (SLOW_COOLDOWN) Weg genommen.
 
-    HYSTERESIS_FAST_COOLDOWN = 2
+    HYSTERESIS_FAST_COOLDOWN = 5
     # Erklärung: Zeit in Sekunden, die der Manager bei "schnellem" Cooldown wartet,
     # bevor er den Lade-Setpoint wieder freigibt.
 
-    HYSTERESIS_SLOW_COOLDOWN = 60
+    HYSTERESIS_SLOW_COOLDOWN = 20
     # Erklärung: Zeit in Sekunden (1 Min), die der Manager bei "langsamem" Cooldown wartet.
     # Schützt das Netz vor schnellen Lastwechseln, wenn der Akku gerade erst gestoppt hat.
 
@@ -112,3 +112,7 @@ class SmartMode:
     # (Bypass/Offgrid) parasitäre Leistung oder schalten sich ab, wenn exakt 0W gefordert werden.
     # Dieses Offset (10W) wird gesetzt, wenn ein Gerät eigentlich 0W machen soll,
     # aber das MQTT-Kommando "10W" benötigt, um nicht in den Standby zu fallen.
+
+    # Mit DISCHARGE_SOC_BUFFER = 2 stoppt die HA-Steuerung bei MinSOC + 2%.
+    # Der SF2400 AC darf selbst dann noch die restlichen 2% abbauen.
+    DISCHARGE_SOC_BUFFER = 2

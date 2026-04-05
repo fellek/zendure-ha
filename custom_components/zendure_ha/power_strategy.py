@@ -190,8 +190,12 @@ async def _classify_devices(mgr: ZendureManager) -> tuple[int, float, int]:
 
 def _classify_single_device(mgr: ZendureManager, d: ZendureDevice, offgrid_power: int) -> tuple[int, int]:
     """Classify one device into charge/discharge/idle. Returns (home, setpoint_delta)."""
-    # SOCEMPTY and fully idle
-    if d.state == DeviceState.SOCEMPTY and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
+    # SOCEMPTY and fully idle (no grid draw, no output, no battery activity)
+    # If homeInput > 0 the device is already drawing from the grid and must be
+    # classified as CHARGE so it receives the full setpoint, not just the
+    # wake-up pulse.  Routing it to idle here would cap charge_limit to 0 and
+    # prevent proper charging.
+    if d.state == DeviceState.SOCEMPTY and d.homeInput.asInt == 0 and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
         mgr.idle.append(d)
         mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
         mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt)
@@ -354,8 +358,8 @@ async def _distribute_power(
     if is_charge and time:
         setpoint = mgr.hysteresis.apply_charge_cooldown(setpoint, time, mgr.operationstate)
 
-    setpoint = _cap_setpoint(setpoint, total_limit, is_charge, label)
     dev_start = _compute_wakeup_threshold(setpoint, optimal, is_charge, mgr)
+    setpoint = _cap_setpoint(setpoint, total_limit, is_charge, label)
 
     remaining = setpoint
     _LOGGER.debug("%s: distributing setpoint=%s across %s devices, dev_start=%s, weight=%s",
@@ -387,6 +391,15 @@ async def _distribute_power(
 
         _LOGGER.debug("%s: [%s/%s] %s soc=%s%% pwr_max=%s weight=%s remaining=%s pwr: weighted=%s clamped=%s final=%s",
                       label, i, len(devices), d.name, soc, d.pwr_max, device_weight, remaining, pwr_weighted, pwr_clamped, pwr)
+
+        # @todo: how does it work with multiple devices?
+        # --- NEU: Min-SoC Schutz bei Entladung ---
+        if not is_charge:
+            min_soc_limit = d.minSoc.asInt + SmartMode.DISCHARGE_SOC_BUFFER
+            if d.electricLevel.asInt <= min_soc_limit:
+                _LOGGER.warning("%s: Discharge blocked! SoC=%s%% too close to minSoc=%s%%",
+                              d.name, d.electricLevel.asInt, min_soc_limit)
+                pwr = 0
 
         # Apply power
         actual_pwr = await d.power_charge(pwr) if is_charge else await d.power_discharge(pwr)
@@ -422,7 +435,7 @@ def _compute_weights(devices: list, is_charge: bool) -> tuple[int, int, int]:
 def _cap_setpoint(setpoint: int, total_limit: int, is_charge: bool, label: str) -> int:
     """Cap setpoint to hardware limits."""
     if is_charge:
-        capped = max(setpoint, -total_limit)
+        capped = max(setpoint, total_limit)
     else:
         capped = min(setpoint, total_limit)
     if capped != setpoint:
@@ -466,6 +479,14 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
         else:
             if d.state == DeviceState.SOCEMPTY:
                 continue
+
+            # --- NEU: Min-SoC Schutz auch beim Aufwecken beachten ---
+            min_soc_limit = d.minSoc.asInt + SmartMode.DISCHARGE_SOC_BUFFER
+            if d.electricLevel.asInt <= min_soc_limit:
+                _LOGGER.debug("Discharge Wakeup blocked: %s SoC=%s%% at minSoc limit", d.name, d.electricLevel.asInt)
+                continue
+            # ---------------------------------------------------------
+
             await d.power_discharge(SmartMode.POWER_START)
             if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
                 break
