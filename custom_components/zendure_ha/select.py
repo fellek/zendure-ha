@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
+import inspect
 
 from .entity import EntityDevice, EntityZendure
 
@@ -78,7 +79,7 @@ class ZendureSelect(EntityZendure, SelectEntity):
         self._attr_current_option = option
         value = self.value
         if self.onchanged:
-            if asyncio.iscoroutinefunction(self.onchanged):
+            if inspect.iscoroutinefunction(self.onchanged):
                 await self.onchanged(self, value)
             else:
                 self.onchanged(self, value)
@@ -111,6 +112,6 @@ class ZendureRestoreSelect(ZendureSelect, RestoreEntity):
         # do the onchanged callback
         if self.onchanged:
             if asyncio.iscoroutinefunction(self.onchanged):
-                await self.onchanged(self, self.current_option)
+                await self.onchanged(self, self.value)
             else:
-                self.onchanged(self, self.current_option)
+                self.onchanged(self, self.value)
