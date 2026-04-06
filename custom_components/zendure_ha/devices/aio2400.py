@@ -5,26 +5,39 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from custom_components.zendure_ha.const import SmartMode
 from custom_components.zendure_ha.device import ZendureLegacy
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class AIO2400(ZendureLegacy):
-    def __init__(self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any) -> None:
+    """AIO 2400 cannot charge using AC."""
+
+    def __init__(self, hass: HomeAssistant, deviceId: str, name: str, definition: Any, parent: str | None = None) -> None:
         """Initialise AIO2400."""
-        super().__init__(hass, deviceId, prodName, definition["productModel"], definition)
-        """AIO 2400 cannot charge using AC"""
+        # Hinweis: Parameter 'prodName' wurde zu 'name' angepasst für Konsistenz zur Basisklasse
+        super().__init__(hass, deviceId, name, definition["productModel"], definition, parent)
+
         self.setLimits(0, 1200)
         self.maxSolar = -1200
 
+        # --- NEU: Port-Konfiguration ---
+        self.pv_port_count = 1  # Gerät hat einen DC-Eingang (maxSolar ist definiert)
+        # _has_offgrid bleibt False (Standard), da keine Offgrid-Steckdose existiert
+        # ------------------------------
+
+        # --- NEU: Port-Initialisierung ---
+        # Muss ganz am Ende stehen, damit maxSolar und Flags gesetzt sind
+        self._init_power_ports()
+        # ---------------------------------
+
     async def charge(self, power: int) -> int:
-        _LOGGER.info(f"No AC charge for {self.name} available")
+        """Überschrieben, da das AIO 2400 nicht über AC laden kann."""
+        _LOGGER.info("No AC charge for %s available", self.name)
         return 0
 
     async def discharge(self, power: int) -> int:
-        _LOGGER.info(f"Power discharge {self.name} => {power}")
+        _LOGGER.info("Power discharge %s => %s", self.name, power)
         self.mqttInvoke(
             {
                 "arguments": [

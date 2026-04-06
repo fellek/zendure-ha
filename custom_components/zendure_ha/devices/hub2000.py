@@ -5,7 +5,8 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from custom_components.zendure_ha.device import ZendureBattery, ZendureLegacy
+from custom_components.zendure_ha.battery import ZendureBattery
+from custom_components.zendure_ha.device import ZendureLegacy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class Hub2000(ZendureLegacy):
         self.limitInput.update_range(0, abs(self.powerMin))
 
     async def charge(self, power: int) -> int:
-        _LOGGER.info(f"Power charge {self.name} => {power}")
+        _LOGGER.info("Power charge %s => %s", self.name, power)
         self.mqttInvoke(
             {
                 "arguments": [{"autoModelProgram": 2, "autoModelValue": power, "msgType": 1, "autoModel": 8}],
@@ -35,7 +36,7 @@ class Hub2000(ZendureLegacy):
         return power
 
     async def discharge(self, power: int) -> int:
-        _LOGGER.info(f"Power discharge {self.name} => {power}")
+        _LOGGER.info("Power discharge %s => %s", self.name, power)
         self.mqttInvoke(
             {
                 "arguments": [{"autoModelProgram": 2, "autoModelValue": power, "msgType": 1, "autoModel": 8}],

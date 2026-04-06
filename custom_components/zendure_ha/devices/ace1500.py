@@ -13,16 +13,31 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class ACE1500(ZendureLegacy):
-    def __init__(self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any, parent: str | None = None) -> None:
+    def __init__(self, hass: HomeAssistant, deviceId: str, name: str, definition: Any,
+                 parent: str | None = None) -> None:
         """Initialise Ace1500."""
-        super().__init__(hass, deviceId, prodName, definition["productModel"], definition, parent)
+        # Hinweis: Parameter 'prodName' wurde zu 'name' angepasst für Konsistenz zur Basisklasse
+        super().__init__(hass, deviceId, name, definition["productModel"], definition, parent)
+
         self.setLimits(-900, 800)
         self.maxSolar = -900
-        self.acSwitch = ZendureSwitch(self, "acSwitch", self.entityWrite, None, "switch",1)
+
+        # --- NEU: Port-Konfiguration ---
+        self.pv_port_count = 1  # Gerät hat einen DC-Eingang (maxSolar ist definiert)
+        # _has_offgrid bleibt False (Standard), da keine Offgrid-Steckdose existiert
+        # ------------------------------
+
+        # Gerätespezifische Entitäten
+        self.acSwitch = ZendureSwitch(self, "acSwitch", self.entityWrite, None, "switch", 1)
         self.dcSwitch = ZendureSelect(self, "dcSwitch", {0: "off", 1: "on"}, self.entityWrite, 1)
 
+        # --- NEU: Port-Initialisierung ---
+        # Muss ganz am Ende stehen, damit maxSolar und Flags gesetzt sind
+        self._init_power_ports()
+        # ---------------------------------
+
     async def charge(self, power: int) -> int:
-        _LOGGER.info(f"Power charge {self.name} => {power}")
+        _LOGGER.info("Power charge %s => %s", self.name, power)
         self.mqttInvoke(
             {
                 "arguments": [
@@ -44,7 +59,7 @@ class ACE1500(ZendureLegacy):
         return power
 
     async def discharge(self, power: int) -> int:
-        _LOGGER.info(f"Power discharge {self.name} => {power}")
+        _LOGGER.info("Power discharge %s => %s", self.name, power)
         self.mqttInvoke(
             {
                 "arguments": [

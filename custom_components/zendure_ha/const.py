@@ -57,8 +57,8 @@ class SmartMode:
     ZENSDK = 2
     CONNECTED = 10
 
-    TIMEFAST = 2.2  # Fast update interval after significant change
-    TIMEZERO = 4  # Normal update interval
+    TIMEFAST = 1.5  # default: 2.2 Fast update interval after significant change
+    TIMEZERO = 4  # default: 4 Normal update interval
 
     # Standard deviation thresholds for detecting significant changes
     P1_STDDEV_FACTOR = 3.5  # Multiplier for P1 meter stddev calculation
@@ -70,4 +70,49 @@ class SmartMode:
     HEMSOFF_TIMEOUT = 60  # Seconds before HEMS state is set to OFF if no updates are received
 
     POWER_START = 50  # Minimum Power (W) for starting a device
-    POWER_TOLERANCE = 5  # Device-level power tolerance (W) before updating
+    POWER_TOLERANCE = 10  # Device-level power tolerance (W) before updating
+
+    # ====================================================================
+    # NEU: Power Distribution & Hysteresis Konstanten
+    # ====================================================================
+
+    # --- Hysteresis (Verhindert Flattern beim Starten/Stoppen) ---
+    HYSTERESIS_START_FACTOR = 1.5
+    # Erklärung: Multiplikator für die Start-Leistung eines Geräts (charge_start / discharge_start).
+    # Wenn das Gerät weniger als 150% seiner Start-Leistung bekommt, baut sich "pwr_low" auf.
+    # Wert erhöhen = Geräte starten schwerer/schneller aus. Wert verringern = toleranter.
+
+    WAKEUP_CAPACITY_FACTOR = 2
+    # Erklärung: Multiplikator für die optimale Leistung (charge_optimal / discharge_optimal).
+    # Berechnet, ob ein "idle"- Gerät reaktiviert werden muss, weil die anderen überlastet sind.
+    # Wert erhöhen = Mehr Puffer, bevor ein weiteres Gerät dazukommt.
+
+    SOC_IDLE_BUFFER = 3
+    # Erklärung: SoC-Puffer in % bei der Entscheidung, ob ein Gerät als "ausgleichend" gilt.
+    # (z.B. idle_lvlmax - 3%). Verhindert, dass Geräte wegen kleiner SoC-Messfehler
+    # ständig zwischen Idle und Active hin und her springen.
+
+    # --- Timing: Charge Cooldown (Hysterese-Zeitfenster) ---
+    HYSTERESIS_LONG_COOLDOWN = 300
+    # Erklärung: Zeit in Sekunden (5 Min), die vergangen sein muss, seit dem letzten Lade-Stop,
+    # damit das System beim nächsten Überschuss "schnell" (FAST_COOLDOWN) wieder anfängt zu laden.
+    # Wenn weniger Zeit vergangen ist, wird der lange (SLOW_COOLDOWN) Weg genommen.
+
+    HYSTERESIS_FAST_COOLDOWN = 5
+    # Erklärung: Zeit in Sekunden, die der Manager bei "schnellem" Cooldown wartet,
+    # bevor er den Lade-Setpoint wieder freigibt.
+
+    HYSTERESIS_SLOW_COOLDOWN = 20
+    # Erklärung: Zeit in Sekunden (1 Min), die der Manager bei "langsamem" Cooldown wartet.
+    # Schützt das Netz vor schnellen Lastwechseln, wenn der Akku gerade erst gestoppt hat.
+
+    # --- Hardware Quirks (Inverter Eigenheiten) ---
+    POWER_IDLE_OFFSET = 10
+    # Erklärung: Manche Wechselrichter (z.B. SF2400) zeigen beim reinen Durchleiten
+    # (Bypass/Offgrid) parasitäre Leistung oder schalten sich ab, wenn exakt 0W gefordert werden.
+    # Dieses Offset (10W) wird gesetzt, wenn ein Gerät eigentlich 0W machen soll,
+    # aber das MQTT-Kommando "10W" benötigt, um nicht in den Standby zu fallen.
+
+    # Mit DISCHARGE_SOC_BUFFER = 2 stoppt die HA-Steuerung bei MinSOC + 2%.
+    # Der SF2400 AC darf selbst dann noch die restlichen 2% abbauen.
+    DISCHARGE_SOC_BUFFER = 2
