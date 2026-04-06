@@ -506,11 +506,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.p1_history.append(p1)
             return
 
-        # calculate the standard deviation
+        # calculate the standard deviation and smoothed average
+        avg = p1  # Fallback, falls die History noch zu kurz ist
         if len(self.p1_history) > 1:
             avg = int(sum(self.p1_history) / len(self.p1_history))
             stddev = SmartMode.P1_STDDEV_FACTOR * max(SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history)))
             isFast = abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev
+            # HINWEIS: Das "self.p1_history.clear()" wurde bewusst entfernt!
+            # Wenn wir die History löschen, verlieren wir den gleitenden Durchschnitt
+            # und der Ping-Pong-Effekt beginnt von vorn.
             if isFast: self.p1_history.clear()
         else:
             isFast = False
@@ -521,7 +525,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             try:
                 # prevent updates during power distribution changes
                 self._reset_power_state()
-                await self.powerChanged(p1, isFast, time)
+                # WICHTIG: Wir übergeben jetzt 'avg' (geglättet) statt 'p1' (roh)
+                await self.powerChanged(avg, isFast, time)
             except Exception as err:
                 _LOGGER.error("Error in power distribution: %s", err)
                 _LOGGER.error(traceback.format_exc())

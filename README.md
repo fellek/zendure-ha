@@ -8,10 +8,23 @@ This Home Assistant integration connects your Zendure devices to Home Assistant,
 
 [![hacs][hacsbadge]][hacs] [![releasebadge]][release] [![License][license-shield]](LICENSE.md) [![hainstall][hainstallbadge]][hainstall]
 
-## Overview
+## Documentation
 
-- **[Installation and ZendureApp Token](https://github.com/Zendure/Zendure-HA/wiki/Installation)**
-  - [Troubleshooting Hyper2000](https://github.com/Zendure/Zendure-HA/wiki/Troubleshooting)
+- **Getting Started:**
+  - [How It Works](docs/how-it-works.md) — Understand what the integration does and how to use it
+  - [Installation and ZendureApp Token](https://github.com/Zendure/Zendure-HA/wiki/Installation)
+
+- **For Developers:**
+  - [Architecture](docs/architecture.md) — Code structure and design patterns
+  - [Smart Mode Deep Dive](docs/smart-mode.md) — How power distribution works
+  - [Development Guide](docs/development.md) — Set up your dev environment and contribute
+
+- **Community Resources:**
+  - [Contributing Guidelines](CONTRIBUTING.md) — How to report bugs, request features, and submit code
+
+## Setup & Troubleshooting
+
+- **[Troubleshooting Hyper2000](https://github.com/Zendure/Zendure-HA/wiki/Troubleshooting)**
   - Tutorials
     - [Domotica & IoT](https://iotdomotica.nl/tutorial/install-zendure-home-assistant-integration-tutorial) 🇬🇧
     - [twoenter blog](https://www.twoenter.nl/blog/en/smarthome-en/zendure-home-battery-home-assistant-integration/) 🇬🇧 or [twoenter blog](https://www.twoenter.nl/blog/home-assistant-nl/zendure-thuisaccu-integratie-met-home-assistant/) 🇳🇱
@@ -39,11 +52,15 @@ This Home Assistant integration connects your Zendure devices to Home Assistant,
   - SF2400 AC
   - SF2400 AC+
   - SF2400 Pro
-  - SuperBase V6400 (?)
-  - SuperBase V4600 not yet supported using the token
+  - SuperBase V4600
+  - SuperBase V6400 (tentative)
 
-- **Device Automation:**
-  - Cheap hours.
+- **Smart Features:**
+  - Cheap hours: Automate charging during low-cost energy periods
+  - Manual power control: Set specific charge/discharge targets
+  - Real-time power balancing: Distribute power across multiple devices
+  - Solar harvesting: Maximize use of generated solar energy
+  - Grid support: Respond to grid stress signals
 
 ## Minimum Requirements
 - [Home Assistant](https://github.com/home-assistant/core) 2025.5+
