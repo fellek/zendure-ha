@@ -17,13 +17,18 @@ body:
       label: What device is this for?
       options:
         - SF2400 AC
+        - SF2400 AC+
+        - SF2400 Pro
+        - SF1600 AC+
         - SF800 Pro
+        - SF800 Plus
         - SF800
         - Hyper2000
         - Hub2000
         - Hub1200
         - Ace1500
         - Aio2400
+        - SuperBase V4600
         - SuperBase V6400
         - Zendure Manager
     validations:
