@@ -57,6 +57,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """Initialize Zendure Manager."""
         super().__init__(hass, _LOGGER, name="Zendure Manager", update_interval=SCAN_INTERVAL, config_entry=entry)
         EntityDevice.__init__(self, hass, "Zendure Manager", "Zendure Manager")
+
         self.devices: list[ZendureDevice] = []
         self.fuse_groups: list[FuseGroup] = []
         self.simulation: bool = False
@@ -70,6 +71,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.grid_port = GridPowerPort()
         self.p1_factor = 1
         self.update_count = 0
+
+        self.socempty: list[ZendureDevice] = []
 
         self.charge: list[ZendureDevice] = []
         self.charge_limit = 0
