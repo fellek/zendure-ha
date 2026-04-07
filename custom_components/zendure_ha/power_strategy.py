@@ -201,10 +201,11 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice, offgrid_power
     if d.state == DeviceState.SOCEMPTY and d.homeInput.asInt > 0 and offgrid_power > 0:
         # Device has been woken: treat as CHARGE for P1-based distribution
         if d.deviceId in mgr.woken_socempty:
-            # Clear from woken set once SOC recovers above minSoc
-            if d.electricLevel.asInt > int(d.minSoc.asNumber):
+            # Clear from woken set once SOC recovers above minSoc + buffer
+            min_soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
+            if d.electricLevel.asInt > min_soc_limit:
                 mgr.woken_socempty.discard(d.deviceId)
-                _LOGGER.debug("Classify %s => recovered from SOCEMPTY, exiting woken state", d.name)
+                _LOGGER.debug("Classify %s => recovered from SOCEMPTY (soc=%s%% > minSoc+buffer=%s%%), exiting woken state", d.name, d.electricLevel.asInt, min_soc_limit)
             else:
                 # Still recovering: classify as CHARGE for P1-based distribution
                 _LOGGER.debug("Classify %s => CHARGE (waking from SOCEMPTY): homeInput=%s offgrid=%s soc=%s%% (woken)",
@@ -230,10 +231,12 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice, offgrid_power
     # wake-up pulse.  Routing it to idle here would cap charge_limit to 0 and
     # prevent proper charging.
     if d.state == DeviceState.SOCEMPTY and d.homeInput.asInt == 0 and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
-        # Clear from woken set once SOC recovers or device becomes active
-        if d.deviceId in mgr.woken_socempty and d.electricLevel.asInt > int(d.minSoc.asNumber):
-            mgr.woken_socempty.discard(d.deviceId)
-            _LOGGER.debug("Classify %s => recovered from SOCEMPTY (idle), exiting woken state", d.name)
+        # Clear from woken set once SOC recovers above minSoc + buffer or device becomes active
+        if d.deviceId in mgr.woken_socempty:
+            min_soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
+            if d.electricLevel.asInt > min_soc_limit:
+                mgr.woken_socempty.discard(d.deviceId)
+                _LOGGER.debug("Classify %s => recovered from SOCEMPTY (idle, soc=%s%% > minSoc+buffer=%s%%), exiting woken state", d.name, d.electricLevel.asInt, min_soc_limit)
 
         mgr.socempty.append(d)
         mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
