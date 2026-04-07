@@ -194,8 +194,25 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice, offgrid_power
     # Gerät mit relais im Durchgangs-Modus (SOCEMPTY + homeInput + offgrid aktiv).
     # Um aus diesem Modus zu entkommen, braucht das Gerät ein power_charge() Kommando
     # von der Integration. Daher: In mgr.socempty für Wake-Handling.
+    #
+    # Achtung: Geräte in woken_socempty sollten als CHARGE klassifiziert werden,
+    # um nach dem Aufwecken P1-basierte Ladung zu erhalten (nicht nur Wake-Pulse).
     # -----------------------------------------------------------------
     if d.state == DeviceState.SOCEMPTY and d.homeInput.asInt > 0 and offgrid_power > 0:
+        # Device has been woken: treat as CHARGE for P1-based distribution
+        if d.deviceId in mgr.woken_socempty:
+            # Clear from woken set once SOC recovers above minSoc
+            if d.electricLevel.asInt > int(d.minSoc.asNumber):
+                mgr.woken_socempty.discard(d.deviceId)
+                _LOGGER.debug("Classify %s => recovered from SOCEMPTY, exiting woken state", d.name)
+            else:
+                # Still recovering: classify as CHARGE for P1-based distribution
+                _LOGGER.debug("Classify %s => CHARGE (waking from SOCEMPTY): homeInput=%s offgrid=%s soc=%s%% (woken)",
+                              d.name, d.homeInput.asInt, offgrid_power, d.electricLevel.asInt)
+                home = -d.homeInput.asInt + offgrid_power
+                mgr.charge.append(d)
+                return home, -d.homeInput.asInt
+
         mgr.socempty.append(d)
         mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
         mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt)
@@ -213,6 +230,11 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice, offgrid_power
     # wake-up pulse.  Routing it to idle here would cap charge_limit to 0 and
     # prevent proper charging.
     if d.state == DeviceState.SOCEMPTY and d.homeInput.asInt == 0 and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
+        # Clear from woken set once SOC recovers or device becomes active
+        if d.deviceId in mgr.woken_socempty and d.electricLevel.asInt > int(d.minSoc.asNumber):
+            mgr.woken_socempty.discard(d.deviceId)
+            _LOGGER.debug("Classify %s => recovered from SOCEMPTY (idle), exiting woken state", d.name)
+
         mgr.socempty.append(d)
         mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
         mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt)
@@ -513,17 +535,14 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
             if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
                 break
 
-        # Charge: wake SOCEMPTY devices if no offgrid relay active
+        # Charge: wake SOCEMPTY devices (including bypass/pass-through state)
+        # A power_charge() command is required to escape bypass mode (see classify comment above).
+        # After waking, track device so it's classified as CHARGE (not SOCEMPTY) for P1-based distribution.
         for d in mgr.socempty:
-            ports = mgr.device_ports.get(d.deviceId, [])
-            offgrid_port = next((p for p in ports if isinstance(p, OffGridPowerPort)), None)
-            offgrid_power = offgrid_port.power if offgrid_port else 0
-            if offgrid_power > 0:
-                _LOGGER.debug("Charge: skip SOCEMPTY %s (offgrid=%sW active, relay in pass-through)", d.name, offgrid_power)
-                continue
             pwr = -SmartMode.POWER_START - max(0, d.pwr_offgrid)
             _LOGGER.debug("Charge: wake SOCEMPTY %s => power_charge(%s)", d.name, pwr)
             await d.power_charge(pwr)
+            mgr.woken_socempty.add(d.deviceId)
     else:
         # Discharge: wake normal idle devices only, respect minSoC limit
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt):

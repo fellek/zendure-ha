@@ -73,6 +73,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.update_count = 0
 
         self.socempty: list[ZendureDevice] = []
+        # @todo rewrite entity woken_socempty as list[ZendureDevice] = []
+        self.woken_socempty: set[str] = set()  # Track device IDs that we've woken from SOCEMPTY
 
         self.charge: list[ZendureDevice] = []
         self.charge_limit = 0
