@@ -296,6 +296,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     device.fuseGroup.onchanged = updateFuseGroup
 
                 fg: FuseGroup | None = None
+                # @todo: check if fusegroup names and values could be magicnumbers wich should put to another place.
                 match device.fuseGroup.state:
                     case "owncircuit" | "group3600":
                         fg = FuseGroup(device.name, 3600, -3600)
@@ -329,6 +330,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Update the fusegroups and select optins for each device
         for device in self.devices:
             try:
+                # @todo: check if fusegroup names and values could be magicnumbers wich should put to another place.
                 fusegroups: dict[Any, str] = {
                     0: "unused",
                     1: "owncircuit",

@@ -44,6 +44,19 @@ class GridPowerPort(PowerPort):
         return self._power
 
 
+class AcPowerPort(PowerPort):
+    """Representiert die AC-Netzverbindung eines Geräts (gridInputPower / outputHomePower)."""
+
+    def __init__(self, device: ZendureDevice):
+        super().__init__(name=f"AC Grid ({device.name})", is_input_only=False)
+        self.device = device
+
+    @property
+    def power(self) -> int:
+        """Positiv = Einspeisung (outputHomePower), Negativ = Netzbezug (gridInputPower)."""
+        return self.device.homeOutput.asInt - self.device.homeInput.asInt
+
+
 class OffGridPowerPort(PowerPort):
     """Representiert die integrierte Offgrid-Steckdose (Input/Output)."""
 

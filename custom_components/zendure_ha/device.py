@@ -25,7 +25,7 @@ from .sensor import ZendureRestoreSensor, ZendureSensor
 from . import ble as ble_transport
 from . import mqtt_protocol
 from .battery import ZendureBattery
-from .power_port import PowerPort, DcSolarPowerPort, OffGridPowerPort
+from .power_port import PowerPort, AcPowerPort, DcSolarPowerPort, OffGridPowerPort
 
 if TYPE_CHECKING:
     from .api import ZendureApi
@@ -86,8 +86,8 @@ class ZendureDevice(EntityDevice):
         """Create the device entities."""
         self.limitOutput = ZendureNumber(self, "outputLimit", self.entityWrite, None, "W", "power", self.discharge_limit, 0, NumberMode.SLIDER)
         self.limitInput = ZendureNumber(self, "inputLimit", self.entityWrite, None, "W", "power", self.charge_limit, 0, NumberMode.SLIDER)
-        self.minSoc = ZendureNumber(self, "minSoc", self.entityWrite, None, "%", "soc", 100, 0, NumberMode.SLIDER, 10)
-        self.socSet = ZendureNumber(self, "socSet", self.entityWrite, None, "%", "soc", 100, 0, NumberMode.SLIDER, 10)
+        self.minSoc = ZendureNumber(self, "minSoc", self.entityWrite, None, "%", "soc", 95, 10, NumberMode.SLIDER, 10)
+        self.socSet = ZendureNumber(self, "socSet", self.entityWrite, None, "%", "soc", 95, 10, NumberMode.SLIDER, 10)
         self.socStatus = ZendureSensor(self, "socStatus", state=0)
         self.socLimit = ZendureSensor(self, "socLimit", state=0)
         self.byPass = ZendureBinarySensor(self, "pass")
@@ -125,6 +125,10 @@ class ZendureDevice(EntityDevice):
         """Initialisiert Ports NUR, wenn das Gerät diese auch physisch hat."""
         self.solarPort: DcSolarPowerPort | None = None
         self.offgridPort: OffGridPowerPort | None = None
+
+        # 0. AC Grid Port: Jedes Gerät hat eine AC-Netzverbindung
+        self.acPort = AcPowerPort(self)
+        self.ports.append(self.acPort)
 
         # 1. DC Solar Port: Wird IGNORIERT, wenn pv_port_count == 0
         if self.pv_port_count > 0 and self.maxSolar != 0:

@@ -187,6 +187,7 @@ async def _classify_devices(mgr: ZendureManager) -> tuple[int, float, int]:
     return setpoint, available_kwh, power
 
 
+# @todo offgridpower should be power port of ZendureDevice. systemwide Offgrid oder power of different devices should not be checked.
 def _classify_single_device(mgr: ZendureManager, d: ZendureDevice, offgrid_power: int) -> tuple[int, int]:
     """Classify one device into charge/discharge/idle. Returns (home, setpoint_delta)."""
     # -----------------------------------------------------------------
