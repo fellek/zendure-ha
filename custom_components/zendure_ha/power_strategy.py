@@ -7,8 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from .const import DeviceState, ManagerMode, ManagerState, SmartMode
-from .power_port import DcSolarPowerPort, OffGridPowerPort
+from .const import DeviceState, ManagerMode, PowerFlowState, SmartMode
 
 if TYPE_CHECKING:
     from .device import ZendureDevice
@@ -56,7 +55,7 @@ class HysteresisState:
         """Reset only the accumulator (e.g. after waking idle devices)."""
         self.accumulator = 0
 
-    def apply_charge_cooldown(self, setpoint: int, time: datetime, operationstate: Any) -> int:
+    def apply_charge_cooldown(self, setpoint: int, time: datetime, power_flow_sensor: Any) -> int:
         """Apply cooldown hysteresis before allowing charge. Returns adjusted setpoint."""
         if self.charge_time > time:
             if self.charge_time == datetime.max:
@@ -72,7 +71,7 @@ class HysteresisState:
             _LOGGER.debug("Charge: hysteresis active, setpoint %s => 0 (waiting until %s)", setpoint, self.charge_time)
             return 0
         else:
-            operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
+            power_flow_sensor.update_value(PowerFlowState.CHARGE.value if setpoint < 0 else PowerFlowState.IDLE.value)
             return setpoint
 
     def apply_device_suppression(self, pwr: int, is_charge: bool, start: int, optimal: int, state: DeviceState, label: str, name: str) -> int:
@@ -132,7 +131,6 @@ def reset_power_state(mgr: ZendureManager) -> None:
     mgr.idle_lvlmax = 0
     mgr.idle_lvlmin = 100
     mgr.produced = 0
-    mgr.socempty.clear()
 
 async def classify_and_dispatch(mgr: ZendureManager, p1: int, isFast: bool, time: datetime) -> None:
     """Classify devices into charge/discharge/idle and dispatch to the active mode."""
@@ -158,126 +156,52 @@ async def _classify_devices(mgr: ZendureManager) -> tuple[int, float, int]:
     setpoint = mgr.grid_port.power
     power = 0
 
-    # Build port lookup once instead of searching per iteration
-    offgrid_map: dict[str, OffGridPowerPort | None] = {}
-    solar_map: dict[str, DcSolarPowerPort | None] = {}
-    for d in mgr.devices:
-        ports = mgr.device_ports.get(d.deviceId, [])
-        offgrid_map[d.deviceId] = next((p for p in ports if isinstance(p, OffGridPowerPort)), None)
-        solar_map[d.deviceId] = next((p for p in ports if isinstance(p, DcSolarPowerPort)), None)
-
     for d in mgr.devices:
         if not await d.power_get():
             continue
 
-        offgrid_port = offgrid_map.get(d.deviceId)
-        solar_port = solar_map.get(d.deviceId)
-        offgrid_power = offgrid_port.power if offgrid_port else 0
-        solar_power = solar_port.total_raw_solar if solar_port else 0
-
-        d.pwr_produced = min(0,
-                             d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt - solar_power)
         mgr.produced -= d.pwr_produced
 
-        home, setpoint_delta = _classify_single_device(mgr, d, offgrid_power)
+        home, setpoint_delta = _classify_single_device(mgr, d)
         setpoint += setpoint_delta
         available_kwh += d.actualKwh
-        power += offgrid_power + home + d.pwr_produced
+        power += d.offgrid_power + home + d.pwr_produced
 
     return setpoint, available_kwh, power
 
 
-# @todo offgridpower should be power port of ZendureDevice. systemwide Offgrid oder power of different devices should not be checked.
-def _classify_single_device(mgr: ZendureManager, d: ZendureDevice, offgrid_power: int) -> tuple[int, int]:
-    """Classify one device into charge/discharge/idle. Returns (home, setpoint_delta)."""
-    # -----------------------------------------------------------------
-    # 1. SOCEMPTY mit Bypass / Pass-Through Erkennung
-    # Gerät mit relais im Durchgangs-Modus (SOCEMPTY + homeInput + offgrid aktiv).
-    # Um aus diesem Modus zu entkommen, braucht das Gerät ein power_charge() Kommando
-    # von der Integration. Daher: In mgr.socempty für Wake-Handling.
-    #
-    # Achtung: Geräte in woken_socempty sollten als CHARGE klassifiziert werden,
-    # um nach dem Aufwecken P1-basierte Ladung zu erhalten (nicht nur Wake-Pulse).
-    # -----------------------------------------------------------------
-    if d.state == DeviceState.SOCEMPTY and d.homeInput.asInt > 0 and offgrid_power > 0:
-        # Device has been woken: treat as CHARGE for P1-based distribution
-        if d.deviceId in mgr.woken_socempty:
-            # Clear from woken set once SOC recovers above minSoc + buffer
-            min_soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
-            if d.electricLevel.asInt > min_soc_limit:
-                mgr.woken_socempty.discard(d.deviceId)
-                _LOGGER.debug("Classify %s => recovered from SOCEMPTY (soc=%s%% > minSoc+buffer=%s%%), exiting woken state", d.name, d.electricLevel.asInt, min_soc_limit)
-            else:
-                # Still recovering: classify as CHARGE for P1-based distribution
-                _LOGGER.debug("Classify %s => CHARGE (waking from SOCEMPTY): homeInput=%s offgrid=%s soc=%s%% (woken)",
-                              d.name, d.homeInput.asInt, offgrid_power, d.electricLevel.asInt)
-                home = -d.homeInput.asInt + offgrid_power
-                mgr.charge.append(d)
-                return home, -d.homeInput.asInt
+def _classify_single_device(mgr: ZendureManager, d: ZendureDevice) -> tuple[int, int]:
+    """Sortiert Device in Manager-Listen basierend auf power_flow_state."""
+    offgrid_load = d.offgridPort.consumption if d.offgridPort else 0
 
-        mgr.socempty.append(d)
-        mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
-        mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt)
-        _LOGGER.debug(
-            "Classify %s => SOCEMPTY (bypass): homeInput=%s offgrid=%s soc=%s%%",
-            d.name, d.homeInput.asInt, offgrid_power, d.electricLevel.asInt)
-        return 0, 0
+    match d.power_flow_state:
+        case PowerFlowState.OFF:
+            return 0, 0
 
-    # -----------------------------------------------------------------
-    # 2. SOCEMPTY vollständig idle
-    # -----------------------------------------------------------------
-    # SOCEMPTY and fully idle (no grid draw, no output, no battery activity)
-    # If homeInput > 0 the device is already drawing from the grid and must be
-    # classified as CHARGE so it receives the full setpoint, not just the
-    # wake-up pulse.  Routing it to idle here would cap charge_limit to 0 and
-    # prevent proper charging.
-    if d.state == DeviceState.SOCEMPTY and d.homeInput.asInt == 0 and d.batteryInput.asInt == 0 and d.homeOutput.asInt == 0:
-        # Clear from woken set once SOC recovers above minSoc + buffer or device becomes active
-        if d.deviceId in mgr.woken_socempty:
-            min_soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
-            if d.electricLevel.asInt > min_soc_limit:
-                mgr.woken_socempty.discard(d.deviceId)
-                _LOGGER.debug("Classify %s => recovered from SOCEMPTY (idle, soc=%s%% > minSoc+buffer=%s%%), exiting woken state", d.name, d.electricLevel.asInt, min_soc_limit)
+        case PowerFlowState.CHARGE:
+            home = -d.acPort.grid_consumption + offgrid_load
+            mgr.charge.append(d)
+            _LOGGER.debug("Classify %s => CHARGE: gridConsumption=%s offgrid=%s home=%s soc=%s",
+                          d.name, d.acPort.grid_consumption, offgrid_load, home, d.electricLevel.asInt)
+            return home, -d.acPort.grid_consumption
 
-        mgr.socempty.append(d)
-        mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
-        mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt)
-        _LOGGER.debug("Classify %s => SOCEMPTY: homeInput=%s offgrid=%s batteryIn=%s soc=%s",
-                       d.name, d.homeInput.asInt, offgrid_power, d.batteryInput.asInt, d.electricLevel.asInt)
-        return 0, 0
+        case PowerFlowState.DISCHARGE:
+            home = d.acPort.feed_in
+            mgr.discharge.append(d)
+            mgr.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
+            mgr.discharge_produced -= d.pwr_produced
+            net_battery = home - offgrid_load
+            _LOGGER.debug("Classify %s => DISCHARGE: feedIn=%s offgrid=%s soc=%s",
+                          d.name, home, offgrid_load, d.electricLevel.asInt)
+            return home, (0 if home == 0 and net_battery <= 0 else home)
 
-    # Charging (home input exceeds offgrid)
-    home = -d.homeInput.asInt + offgrid_power
-    if home < 0:
-        mgr.charge.append(d)
-        _LOGGER.debug("Classify %s => CHARGE: homeInput=%s offgrid=%s home=%s state=%s soc=%s setpoint_delta=%s",
-                       d.name, d.homeInput.asInt, offgrid_power, home, d.state.name, d.electricLevel.asInt, -d.homeInput.asInt)
-        return home, -d.homeInput.asInt
-
-    # Discharging (home output or offgrid active)
-    home = d.homeOutput.asInt
-    if home > 0 or offgrid_power > 0:
-        mgr.discharge.append(d)
-        mgr.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
-        mgr.discharge_produced -= d.pwr_produced
-
-        net_battery = home - offgrid_power
-        if home == 0 and net_battery <= 0:
-            _LOGGER.debug("Classify %s => DISCHARGE (WAKEUP): homeOutput=%s offgrid=%s state=%s soc=%s",
-                           d.name, d.homeOutput.asInt, offgrid_power, d.state.name, d.electricLevel.asInt)
-            return home, 0
-        else:
-            _LOGGER.debug("Classify %s => DISCHARGE (ACTIVE): homeOutput=%s offgrid=%s state=%s soc=%s setpoint_delta=%s",
-                           d.name, d.homeOutput.asInt, offgrid_power, d.state.name, d.electricLevel.asInt, net_battery)
-            return home, home
-
-    # Idle
-    mgr.idle.append(d)
-    mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
-    mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
-    _LOGGER.debug("Classify %s => IDLE: homeInput=%s homeOutput=%s offgrid=%s state=%s soc=%s",
-                   d.name, d.homeInput.asInt, d.homeOutput.asInt, offgrid_power, d.state.name, d.electricLevel.asInt)
-    return 0, 0
+        case _:  # IDLE, BYPASS, WAKEUP
+            mgr.idle.append(d)
+            mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
+            mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
+            _LOGGER.debug("Classify %s => %s: gridConsumption=%s offgrid=%s soc=%s",
+                          d.name, d.power_flow_state.name, d.acPort.grid_consumption, offgrid_load, d.electricLevel.asInt)
+            return 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +254,7 @@ async def _dispatch_to_mode(mgr: ZendureManager, p1: int, setpoint: int, isFast:
                 _LOGGER.info("Set Manual power charging: isFast:%s, setpoint:%sW stored:%sW", isFast, setpoint, mgr.produced)
 
         case ManagerMode.OFF:
-            mgr.operationstate.update_value(ManagerState.OFF.value)
+            mgr.power_flow_sensor.update_value(PowerFlowState.OFF.value)
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +275,8 @@ async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) 
             _LOGGER.debug("Charge: promote discharge %s => charge (pwr_max=%s, charge_limit=%s, soc=%s)",
                            d.name, d.pwr_max, d.charge_limit, d.electricLevel.asInt)
         else:
-            stop_pwr = 0 if d.pwr_offgrid == 0 else -SmartMode.POWER_IDLE_OFFSET
-            _LOGGER.debug("Charge: stop discharge %s => power_charge(%s) [SOCFULL, offgrid=%s]", d.name, stop_pwr, d.pwr_offgrid)
+            stop_pwr = 0 if d.offgrid_power == 0 else -SmartMode.POWER_IDLE_OFFSET
+            _LOGGER.debug("Charge: stop discharge %s => power_charge(%s) [SOCFULL, offgrid=%s]", d.name, stop_pwr, d.offgrid_power)
             await d.power_charge(stop_pwr)
 
     await _distribute_power(mgr, active_devices, setpoint, CHARGE_DIR, time)
@@ -361,22 +285,26 @@ async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) 
 async def distribute_discharge(mgr: ZendureManager, setpoint: int) -> None:
     """Prepare discharge list and delegate distribution."""
     _LOGGER.info("Discharge => setpoint %sW", setpoint)
-    mgr.operationstate.update_value(
-        ManagerState.DISCHARGE.value if setpoint > 0 and mgr.discharge else ManagerState.IDLE.value)
+    mgr.power_flow_sensor.update_value(
+        PowerFlowState.DISCHARGE.value if setpoint > 0 and mgr.discharge else PowerFlowState.IDLE.value)
 
     # Reset charge hysteresis on mode switch
     if mgr.hysteresis.charge_time != datetime.max:
         mgr.hysteresis.reset()
 
-    # Stop charging devices (but never discharge SOCEMPTY)
+    # Stop charging devices (but never discharge SOCEMPTY or near-empty devices)
     for d in mgr.charge:
         if d.state == DeviceState.SOCEMPTY:
             continue
-        await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 else SmartMode.POWER_IDLE_OFFSET)
+        if d.electricLevel.asInt <= int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER:
+            continue
+        await d.power_discharge(0 if (d.offgridPort.consumption if d.offgridPort else 0) == 0 else SmartMode.POWER_IDLE_OFFSET)
 
     # Cold-start wakeup: kein aktives Discharge-Gerät, aber Bedarf vorhanden
     if not mgr.discharge and mgr.idle and setpoint > SmartMode.POWER_START:
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt, reverse=True):
+            if d.state == DeviceState.SOCEMPTY:
+                continue
             min_soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
             if d.electricLevel.asInt <= min_soc_limit:
                 _LOGGER.debug("Discharge Wakeup blocked: %s SoC=%s%% at minSoc limit", d.name, d.electricLevel.asInt)
@@ -412,7 +340,7 @@ async def _distribute_power(
 
     # Charge hysteresis (cooldown before allowing charge)
     if is_charge and time:
-        setpoint = mgr.hysteresis.apply_charge_cooldown(setpoint, time, mgr.operationstate)
+        setpoint = mgr.hysteresis.apply_charge_cooldown(setpoint, time, mgr.power_flow_sensor)
 
     dev_start = _compute_wakeup_threshold(setpoint, optimal, is_charge, mgr)
     setpoint = _cap_setpoint(setpoint, total_limit, is_charge, label)
@@ -517,42 +445,59 @@ def _compute_device_power(remaining: int, device_weight: int, total_weight: int,
 
 
 async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: bool) -> None:
-    """Wake up idle and SOCEMPTY devices if active devices are overloaded.
+    """Wake idle/bypass devices. Charge: bypass-energy pass first, then grid-demand pass. Discharge: idle only."""
+    _LOGGER.debug("%s: dev_start=%s idle=%s", "Charge" if is_charge else "Discharge", dev_start, len(mgr.idle))
 
-    Charge path: wake normal idle devices first (with dev_start threshold),
-    then wake SOCEMPTY devices if no offgrid active.
-    Discharge path: wake normal idle devices only (respecting minSoC limit).
-    SOCEMPTY devices never discharged.
-    """
+    if is_charge:
+        # Pass 1: wake BYPASS devices with available local energy (solar/offgrid feed-in)
+        for d in mgr.idle:
+            if d.power_flow_state != PowerFlowState.BYPASS:
+                continue
+            if d.state == DeviceState.SOCFULL:
+                continue
+            solar = d.solarPort.total_raw_solar if d.solarPort else 0
+            offgrid_feed_in = d.offgridPort.feed_in if d.offgridPort else 0
+            bypass_available = solar + offgrid_feed_in
+            if bypass_available == 0:
+                continue
+            offgrid_load = d.offgridPort.consumption if d.offgridPort else 0
+            pwr = -(bypass_available + offgrid_load)
+            _LOGGER.debug("Charge: wake BYPASS %s => power_charge(%s) [solar=%s offgrid_in=%s]",
+                          d.name, pwr, solar, offgrid_feed_in)
+            await d.power_charge(pwr)
+            if d.state == DeviceState.SOCEMPTY:
+                d.power_flow_state = PowerFlowState.WAKEUP
+
     needs_wake = (dev_start < 0) if is_charge else (dev_start > 0)
-    label = "Charge" if is_charge else "Discharge"
-    _LOGGER.debug("%s: dev_start=%s idle=%s socempty=%s", label, dev_start, len(mgr.idle), len(mgr.socempty))
-
     if not needs_wake:
+        mgr.hysteresis.reset_accumulator()
         return
 
     if is_charge:
-        # Charge: wake normal idle devices first (highest SOC first)
+        # Pass 2: wake remaining devices based on grid demand (highest SOC first)
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt, reverse=True):
-            await d.power_charge(
-                -SmartMode.POWER_START - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid))
-            if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
-                break
-
-        # Charge: wake SOCEMPTY devices (including bypass/pass-through state)
-        # A power_charge() command is required to escape bypass mode (see classify comment above).
-        # After waking, track device so it's classified as CHARGE (not SOCEMPTY) for P1-based distribution.
-        for d in mgr.socempty:
-            pwr = -SmartMode.POWER_START - max(0, d.pwr_offgrid)
-            _LOGGER.debug("Charge: wake SOCEMPTY %s => power_charge(%s)", d.name, pwr)
-            await d.power_charge(pwr)
-            mgr.woken_socempty.add(d.deviceId)
+            if d.power_flow_state == PowerFlowState.WAKEUP:
+                continue  # already waiting
+            offgrid_load = d.offgridPort.consumption if d.offgridPort else 0
+            if d.state == DeviceState.SOCFULL:
+                await d.power_charge(-offgrid_load)
+            else:
+                pwr = -SmartMode.POWER_START - offgrid_load
+                _LOGGER.debug("Charge: wake %s %s => power_charge(%s)", d.power_flow_state.name, d.name, pwr)
+                await d.power_charge(pwr)
+                if d.state == DeviceState.SOCEMPTY:
+                    d.power_flow_state = PowerFlowState.WAKEUP
+            if d.state != DeviceState.SOCEMPTY:
+                if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
+                    break
     else:
-        # Discharge: wake normal idle devices only, respect minSoC limit
+        # Discharge: SOCEMPTY and WAKEUP devices are never discharged
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt):
+            if d.state == DeviceState.SOCEMPTY or d.power_flow_state == PowerFlowState.WAKEUP:
+                continue
             min_soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
             if d.electricLevel.asInt <= min_soc_limit:
-                _LOGGER.debug("Discharge Wakeup blocked: %s SoC=%s%% at minSoc limit", d.name, d.electricLevel.asInt)
+                _LOGGER.debug("Discharge blocked: %s SoC=%s%% at limit", d.name, d.electricLevel.asInt)
                 continue
             await d.power_discharge(SmartMode.POWER_START)
             if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:

@@ -30,8 +30,9 @@ from .const import (
     CONF_P1METER,
     DOMAIN,
     DeviceState,
+    FuseGroupType,
     ManagerMode,
-    ManagerState,
+    PowerFlowState,
     SmartMode,
 )
 from .device import DeviceSettings, ZendureDevice, ZendureLegacy
@@ -71,10 +72,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.grid_port = GridPowerPort()
         self.p1_factor = 1
         self.update_count = 0
-
-        self.socempty: list[ZendureDevice] = []
-        # @todo rewrite entity woken_socempty as list[ZendureDevice] = []
-        self.woken_socempty: set[str] = set()  # Track device IDs that we've woken from SOCEMPTY
 
         self.charge: list[ZendureDevice] = []
         self.charge_limit = 0
@@ -145,7 +142,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"},
             self.update_operation
         )
-        self.operationstate = ZendureSensor(self, "operation_state")
+        self.power_flow_sensor = ZendureSensor(self, "power_flow_state")
         self.manualpower = ZendureRestoreNumber(
             self, "manual_power", None, None, "W", "power", 12000, -12000,
             NumberMode.BOX, True
@@ -295,33 +292,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 if device.fuseGroup.onchanged is None:
                     device.fuseGroup.onchanged = updateFuseGroup
 
-                fg: FuseGroup | None = None
-                # @todo: check if fusegroup names and values could be magicnumbers wich should put to another place.
-                match device.fuseGroup.state:
-                    case "owncircuit" | "group3600":
-                        fg = FuseGroup(device.name, 3600, -3600)
-                    case "group800":
-                        fg = FuseGroup(device.name, 800, -1200)
-                    case "group800_2400":
-                        fg = FuseGroup(device.name, 800, -2400)
-                    case "group1200":
-                        fg = FuseGroup(device.name, 1200, -1200)
-                    case "group2000":
-                        fg = FuseGroup(device.name, 2000, -2000)
-                    case "group2400":
-                        fg = FuseGroup(device.name, 2400, -2400)
-                    case "unused":
-                        # only switch off, if Manager is used
-                        if self.operation != ManagerMode.OFF:
-                            await device.power_off()
-                        continue
-                    case _:
-                        _LOGGER.debug("Device %s has unsupported fuseGroup state: %s", device.name, device.fuseGroup.state)
-                        continue
-
-                if fg is not None:
-                    fg.devices.append(device)
-                    fuse_groups[device.deviceId] = fg
+                fgt = FuseGroupType.from_label(device.fuseGroup.state)
+                if fgt is None:
+                    _LOGGER.debug("Device %s has unsupported fuseGroup state: %s", device.name, device.fuseGroup.state)
+                    continue
+                if fgt is FuseGroupType.UNUSED:
+                    if self.operation != ManagerMode.OFF:
+                        await device.power_off()
+                    continue
+                fg = FuseGroup(device.name, fgt.maxpower, fgt.minpower)
+                fg.devices.append(device)
+                fuse_groups[device.deviceId] = fg
             except AttributeError as err:
                 _LOGGER.error("Device %s missing fuseGroup attribute: %s", device.name, err)
             except Exception as err:
@@ -330,17 +311,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Update the fusegroups and select optins for each device
         for device in self.devices:
             try:
-                # @todo: check if fusegroup names and values could be magicnumbers wich should put to another place.
-                fusegroups: dict[Any, str] = {
-                    0: "unused",
-                    1: "owncircuit",
-                    2: "group800",
-                    3: "group800_2400",
-                    4: "group1200",
-                    5: "group2000",
-                    6: "group2400",
-                    7: "group3600",
-                }
+                fusegroups: dict[Any, str] = FuseGroupType.as_select_dict()
                 for deviceId, fg in fuse_groups.items():
                     if deviceId != device.deviceId:
                         fusegroups[deviceId] = f"Part of {fg.name} fusegroup"
@@ -462,9 +433,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         rows = [f"{time_str};{p1};{self.operation.value}"]  # Enums erben von Natur aus einem String
 
         for d in self.devices:
-            tbattery = d.batteryOutput.asInt - d.batteryInput.asInt
-            tsolar = d.solarInput.asInt
-            thome = d.homeOutput.asInt - d.homeInput.asInt
+            tbattery = d.batteryPort.power
+            tsolar = d.solarPort.total_raw_solar if d.solarPort else 0
+            thome = d.acPort.power
             rows.append(f";{tbattery};{tsolar};{thome};{d.electricLevel.asInt}")
         rows.append(f";{self.manualpower.asNumber}")
 

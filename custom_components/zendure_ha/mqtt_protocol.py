@@ -150,11 +150,11 @@ def entity_update_side_effects(device: ZendureDevice, key: Any, value: Any) -> N
                 if not device.heatState.is_on:
                     device.aggrCharge.aggregate(dt_util.now(), value)
                 device.aggrDischarge.aggregate(dt_util.now(), 0)
-                device.batInOut.update_value(device.batteryOutput.asInt - device.batteryInput.asInt)
+                device.batInOut.update_value(device.batteryPort.power)
             case "packInputPower":
                 device.aggrCharge.aggregate(dt_util.now(), 0)
                 device.aggrDischarge.aggregate(dt_util.now(), value)
-                device.batInOut.update_value(device.batteryOutput.asInt - device.batteryInput.asInt)
+                device.batInOut.update_value(device.batteryPort.power)
             case "solarInputPower":
                 device.aggrSolar.aggregate(dt_util.now(), value)
             case "gridInputPower":

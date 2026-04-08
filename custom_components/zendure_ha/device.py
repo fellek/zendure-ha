@@ -17,7 +17,7 @@ from paho.mqtt import client as mqtt_client
 
 from .binary_sensor import ZendureBinarySensor
 from .button import ZendureButton
-from .const import DeviceState, SmartMode
+from .const import DeviceState, FuseGroupType, PowerFlowState, SmartMode
 from .entity import EntityDevice, EntityZendure
 from .number import ZendureNumber
 from .select import ZendureRestoreSelect, ZendureSelect
@@ -25,7 +25,7 @@ from .sensor import ZendureRestoreSensor, ZendureSensor
 from . import ble as ble_transport
 from . import mqtt_protocol
 from .battery import ZendureBattery
-from .power_port import PowerPort, AcPowerPort, DcSolarPowerPort, OffGridPowerPort
+from .power_port import PowerPort, AcPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort
 
 if TYPE_CHECKING:
     from .api import ZendureApi
@@ -75,9 +75,9 @@ class ZendureDevice(EntityDevice):
         self.pv_port_count: int = 1  # <-- NEU: Standard ist 1 PV-Port
         self.solar_inputs: list[ZendureSensor] = [] # <-- NEU: Speichert alle PV-Sensoren
         self.pwr_max: int = 0
-        self.pwr_produced: int = 0
         self.actualKwh: float = 0.0
         self.state: DeviceState = DeviceState.OFFLINE
+        self.power_flow_state: PowerFlowState = PowerFlowState.OFF
 
         self.create_entities()
         self.ports: list[PowerPort] = []      # Wird von jeder Subklasse befüllt
@@ -92,8 +92,7 @@ class ZendureDevice(EntityDevice):
         self.socLimit = ZendureSensor(self, "socLimit", state=0)
         self.byPass = ZendureBinarySensor(self, "pass")
 
-        fuseGroups = {0: "unused", 1: "owncircuit", 2: "group800", 3: "group800_2400", 4: "group1200", 5: "group2000", 6: "group2400", 7: "group3600"}
-        self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", fuseGroups, None)
+        self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", FuseGroupType.as_select_dict(), None)
         self.acMode = ZendureSelect(self, "acMode", {1: "input", 2: "output"}, self.entityWrite, 1)
         self.electricLevel = ZendureSensor(self, "electricLevel", None, "%", "battery", "measurement")
         self.homeInput = ZendureSensor(self, "gridInputPower", None, "W", "power", "measurement")
@@ -119,6 +118,7 @@ class ZendureDevice(EntityDevice):
         self.aggrHomeOut = ZendureRestoreSensor(self, "aggrOutputHome", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSolar = ZendureRestoreSensor(self, "aggrSolar", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSwitchCount = ZendureRestoreSensor(self, "switchCount", None, None, None, "total_increasing", 0)
+        self.power_flow_sensor = ZendureSensor(self, "power_flow_state")
 
     # NEU: Zentrale Initialisierung der Power Ports
     def _init_power_ports(self) -> None:
@@ -130,7 +130,11 @@ class ZendureDevice(EntityDevice):
         self.acPort = AcPowerPort(self)
         self.ports.append(self.acPort)
 
-        # 1. DC Solar Port: Wird IGNORIERT, wenn pv_port_count == 0
+        # 1. Battery Port: Jedes Gerät hat Batterien
+        self.batteryPort = BatteryPowerPort(self)
+        self.ports.append(self.batteryPort)
+
+        # 2. DC Solar Port: Wird IGNORIERT, wenn pv_port_count == 0
         if self.pv_port_count > 0 and self.maxSolar != 0:
             solar_sensors = [self.solarInput] # Der Haupt-Sensor aus create_entities()
             for i in range(2, self.pv_port_count + 1):
@@ -193,7 +197,7 @@ class ZendureDevice(EntityDevice):
     def calcRemainingTime(self) -> float:
         """Calculate the remaining time."""
         level = self.electricLevel.asInt
-        power = self.batteryOutput.asInt - self.batteryInput.asInt
+        power = self.batteryPort.power
 
         if power == 0:
             return 0
@@ -255,13 +259,14 @@ class ZendureDevice(EntityDevice):
 
         if not self.online or self.socSet.asNumber == 0 or self.kWh == 0:
             self.state = DeviceState.OFFLINE
-        elif self.socLimit.asInt == SmartMode.SOCFULL or self.electricLevel.asInt >= self.socSet.asNumber:
+        elif self.socLimit.asInt == DeviceState.SOCFULL.value or self.electricLevel.asInt >= self.socSet.asNumber:
             self.state = DeviceState.SOCFULL
-        elif self.socLimit.asInt == SmartMode.SOCEMPTY or self.electricLevel.asInt <= self.minSoc.asNumber:
+        elif self.socLimit.asInt == DeviceState.SOCEMPTY.value or self.electricLevel.asInt <= self.minSoc.asNumber:
             self.state = DeviceState.SOCEMPTY
         else:
-            self.state = DeviceState.INACTIVE
+            self.state = DeviceState.ACTIVE
 
+        self.update_power_flow_state()
         return self.state != DeviceState.OFFLINE
 
     async def charge(self, _power: int) -> int:
@@ -271,9 +276,9 @@ class ZendureDevice(EntityDevice):
     async def power_charge(self, power: int) -> int:
         """Set charge power."""
         power = min(0, max(power, self.charge_limit))
-        if abs(power - self.homeInput.asInt + self.homeOutput.asInt) <= SmartMode.POWER_TOLERANCE:
+        if abs(power + self.acPort.power) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
-            return self.homeInput.asInt
+            return self.acPort.grid_consumption
         return await self.charge(power)
 
     async def discharge(self, _power: int) -> int:
@@ -283,9 +288,9 @@ class ZendureDevice(EntityDevice):
     async def power_discharge(self, power: int) -> int:
         """Set discharge power."""
         power = max(0, min(power, self.discharge_limit))
-        if abs(power - self.homeOutput.asInt + self.homeInput.asInt) <= SmartMode.POWER_TOLERANCE:
+        if abs(power - self.acPort.power) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)
-            return self.homeOutput.asInt
+            return self.acPort.feed_in
         return await self.discharge(power)
 
     async def power_off(self) -> None:
@@ -300,6 +305,71 @@ class ZendureDevice(EntityDevice):
     def pwr_offgrid(self) -> int:
         """Sicherer Zugriff auf Offgrid-Leistung (0 wenn nicht vorhanden)."""
         return self.offGrid.asInt if self._has_offgrid else 0
+
+    @property
+    def offgrid_power(self) -> int:
+        """Offgrid netto: positiv = Verbrauch, negativ = Einspeisung."""
+        return self.offgridPort.power if self.offgridPort else 0
+
+    def update_power_flow_state(self) -> None:
+        """Bestimmt den Ist-Zustand basierend auf Port-Daten."""
+        # WAKEUP bleibt, bis abs(batteryPort.power) > POWER_START
+        if self.power_flow_state == PowerFlowState.WAKEUP:
+            if abs(self.batteryPort.power) <= SmartMode.POWER_START:
+                return
+            # Gerät hat geantwortet → normal klassifizieren
+        prev_state = self.power_flow_state
+
+        if self.state == DeviceState.OFFLINE:
+            self.power_flow_state = PowerFlowState.OFF
+            self.power_flow_sensor.update_value(self.power_flow_state.value)
+            return
+
+        other_ports_active = (
+            (self.solarPort is not None and self.solarPort.total_raw_solar > 0)
+            or (self.offgridPort is not None and self.offgridPort.power != 0)
+        )
+
+        if self.state == DeviceState.SOCFULL:
+            if self.batteryPort.is_discharging:
+                self.power_flow_state = PowerFlowState.DISCHARGE
+            elif other_ports_active:
+                self.power_flow_state = PowerFlowState.BYPASS
+            else:
+                self.power_flow_state = PowerFlowState.IDLE
+
+        elif self.state == DeviceState.SOCEMPTY:
+            if self.batteryPort.is_charging:
+                self.power_flow_state = PowerFlowState.CHARGE
+            elif other_ports_active:
+                self.power_flow_state = PowerFlowState.BYPASS
+            else:
+                self.power_flow_state = PowerFlowState.IDLE
+
+        else:  # DeviceState.ACTIVE
+            if self.batteryPort.is_charging:
+                self.power_flow_state = PowerFlowState.CHARGE
+            elif self.batteryPort.is_discharging:
+                self.power_flow_state = PowerFlowState.DISCHARGE
+            elif other_ports_active:
+                self.power_flow_state = PowerFlowState.BYPASS
+            else:
+                self.power_flow_state = PowerFlowState.IDLE
+
+        if self.power_flow_state != prev_state:
+            _LOGGER.debug("PowerFlow %s: %s → %s (state=%s soc=%s)",
+                          self.name, prev_state.name, self.power_flow_state.name,
+                          self.state.name, self.electricLevel.asInt)
+        self.power_flow_sensor.update_value(self.power_flow_state.value)
+
+    @property
+    def pwr_produced(self) -> int:
+        """Power produced internally (negative = generation). Computed from ports."""
+        solar = self.solarPort.total_raw_solar if self.solarPort else 0
+        offgrid_feed = self.offgridPort.feed_in if self.offgridPort else 0
+        return min(0,
+                   self.batteryPort.discharge_power + self.acPort.grid_consumption
+                   - self.batteryPort.charge_power - self.acPort.feed_in - solar - offgrid_feed)
 
 
 class ZendureLegacy(ZendureDevice):

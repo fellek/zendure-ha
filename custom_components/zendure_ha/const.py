@@ -29,10 +29,9 @@ class AcMode:
 
 class DeviceState(Enum):
     OFFLINE = 0
-    SOCEMPTY = 1
-    INACTIVE = 2
-    SOCFULL = 3
-    ACTIVE = 4
+    SOCFULL = 1   # Wert entspricht Protokoll-Feld socLimit=1
+    SOCEMPTY = 2  # Wert entspricht Protokoll-Feld socLimit=2
+    ACTIVE = 3
 
 
 class ManagerMode(Enum):
@@ -44,16 +43,51 @@ class ManagerMode(Enum):
     STORE_SOLAR = 5
 
 
-class ManagerState(Enum):
-    IDLE = 0
-    CHARGE = 1
-    DISCHARGE = 2
-    OFF = 3
+class PowerFlowState(Enum):
+    # @todo communicate breaking change
+    # BREAKING CHANGE: OFF (3→0) und IDLE (0→3) wurden neu geordnet.
+    # Die HA-Entity `power_flow_state` speichert Integer-Werte —
+    # Automationen/Dashboards die auf 0=IDLE oder 3=OFF geprüft haben, müssen angepasst werden.
+    OFF = 0        # Manager deaktiviert (war 3)
+    CHARGE = 1     # Entspricht AcMode.INPUT = 1
+    DISCHARGE = 2  # Entspricht AcMode.OUTPUT = 2
+    IDLE = 3       # Kein aktiver Fluss (war 0)
+    BYPASS = 4     # SOCEMPTY + passiver Stromfluss (offgrid)
+    WAKEUP = 5     # Übergang SOCEMPTY → aktiv
+
+
+class FuseGroupType(Enum):
+    """Fuse group type with integer index, string label, and power limits."""
+
+    # value = (index, label, maxpower, minpower)
+    UNUSED        = (0, "unused",        0,     0)
+    OWNCIRCUIT    = (1, "owncircuit",    3600, -3600)
+    GROUP800      = (2, "group800",      800,  -1200)
+    GROUP800_2400 = (3, "group800_2400", 800,  -2400)
+    GROUP1200     = (4, "group1200",     1200, -1200)
+    GROUP2000     = (5, "group2000",     2000, -2000)
+    GROUP2400     = (6, "group2400",     2400, -2400)
+    GROUP3600     = (7, "group3600",     3600, -3600)
+
+    def __init__(self, index: int, label: str, maxpower: int, minpower: int) -> None:
+        self.index = index
+        self.label = label
+        self.maxpower = maxpower
+        self.minpower = minpower
+
+    @classmethod
+    def as_select_dict(cls) -> dict[int, str]:
+        return {m.index: m.label for m in cls}
+
+    @classmethod
+    def from_label(cls, label: str) -> "FuseGroupType | None":
+        for m in cls:
+            if m.label == label:
+                return m
+        return None
 
 
 class SmartMode:
-    SOCFULL = 1
-    SOCEMPTY = 2
     ZENSDK = 2
     CONNECTED = 10
 
