@@ -150,7 +150,7 @@ class EntityDevice:
         "heatState": ("binary"),
         "restState": ("binary"),
         "reverseState": ("binary"),
-        "pass": ("binary"),
+        # "pass" wird als BypassRelay in device.py erstellt (self.bypass = BypassRelay(self))
         "lowTemperature": ("binary"),
         "autoHeat": ("select", {0: "off", 1: "on"}, 1),
         "localState": ("binary"),

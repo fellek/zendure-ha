@@ -195,7 +195,7 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice) -> tuple[int,
                           d.name, home, offgrid_load, d.electricLevel.asInt)
             return home, (0 if home == 0 and net_battery <= 0 else home)
 
-        case _:  # IDLE, BYPASS, WAKEUP
+        case _:  # IDLE, WAKEUP   (BYPASS removed — use device.is_bypassing instead)
             mgr.idle.append(d)
             mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
             mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
@@ -444,28 +444,44 @@ def _compute_device_power(remaining: int, device_weight: int, total_weight: int,
     return 0
 
 
+def _need_wakeup(d: "ZendureDevice") -> bool:
+    """True if device qualifies for bypass-energy wakeup (Pass 1).
+
+    Conditions: bypass active (implies energy flowing) + battery idle + SOCEMPTY or SOCFULL.
+    """
+    return (
+        d.bypass.is_active
+        and d.power_flow_state == PowerFlowState.IDLE
+        and d.state in (DeviceState.SOCEMPTY, DeviceState.SOCFULL)
+    )
+
+
 async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: bool) -> None:
     """Wake idle/bypass devices. Charge: bypass-energy pass first, then grid-demand pass. Discharge: idle only."""
     _LOGGER.debug("%s: dev_start=%s idle=%s", "Charge" if is_charge else "Discharge", dev_start, len(mgr.idle))
 
     if is_charge:
-        # Pass 1: wake BYPASS devices with available local energy (solar/offgrid feed-in)
+        # Pass 1: wake BYPASS devices — battery must receive/deliver net POWER_START despite bypass offset
         for d in mgr.idle:
-            if d.power_flow_state != PowerFlowState.BYPASS:
+            if not _need_wakeup(d):
                 continue
-            if d.state == DeviceState.SOCFULL:
-                continue
-            solar = d.solarPort.total_raw_solar if d.solarPort else 0
-            offgrid_feed_in = d.offgridPort.feed_in if d.offgridPort else 0
-            bypass_available = solar + offgrid_feed_in
-            if bypass_available == 0:
-                continue
-            offgrid_load = d.offgridPort.consumption if d.offgridPort else 0
-            pwr = -(bypass_available + offgrid_load)
-            _LOGGER.debug("Charge: wake BYPASS %s => power_charge(%s) [solar=%s offgrid_in=%s]",
-                          d.name, pwr, solar, offgrid_feed_in)
-            await d.power_charge(pwr)
+            solar        = d.solarPort.total_raw_solar if d.solarPort else 0
+            offgrid_in   = d.offgridPort.feed_in       if d.offgridPort else 0
+            offgrid_load = d.offgridPort.consumption   if d.offgridPort else 0
+            bypass_available = solar + offgrid_in
+
             if d.state == DeviceState.SOCEMPTY:
+                pwr = -(SmartMode.POWER_START + bypass_available + offgrid_load)
+                _LOGGER.debug("Bypass-wake SOCEMPTY %s => power_charge(%s) [bypass=%s offgrid_load=%s]",
+                              d.name, pwr, bypass_available, offgrid_load)
+                await d.power_charge(pwr)
+                d.power_flow_state = PowerFlowState.WAKEUP
+
+            elif d.state == DeviceState.SOCFULL:
+                pwr = SmartMode.POWER_START + bypass_available - offgrid_load
+                _LOGGER.debug("Bypass-wake SOCFULL %s => power_discharge(%s) [bypass=%s offgrid_load=%s]",
+                              d.name, pwr, bypass_available, offgrid_load)
+                await d.power_discharge(pwr)
                 d.power_flow_state = PowerFlowState.WAKEUP
 
     needs_wake = (dev_start < 0) if is_charge else (dev_start > 0)

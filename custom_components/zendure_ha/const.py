@@ -52,7 +52,6 @@ class PowerFlowState(Enum):
     CHARGE = 1     # Entspricht AcMode.INPUT = 1
     DISCHARGE = 2  # Entspricht AcMode.OUTPUT = 2
     IDLE = 3       # Kein aktiver Fluss (war 0)
-    BYPASS = 4     # SOCEMPTY + passiver Stromfluss (offgrid)
     WAKEUP = 5     # Übergang SOCEMPTY → aktiv
 
 

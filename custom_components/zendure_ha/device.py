@@ -16,6 +16,7 @@ from homeassistant.core import HomeAssistant
 from paho.mqtt import client as mqtt_client
 
 from .binary_sensor import ZendureBinarySensor
+from .bypass_relay import BypassRelay
 from .button import ZendureButton
 from .const import DeviceState, FuseGroupType, PowerFlowState, SmartMode
 from .entity import EntityDevice, EntityZendure
@@ -80,7 +81,13 @@ class ZendureDevice(EntityDevice):
         self.power_flow_state: PowerFlowState = PowerFlowState.OFF
 
         self.create_entities()
+        self.bypass = BypassRelay(self)
         self.ports: list[PowerPort] = []      # Wird von jeder Subklasse befüllt
+
+    @property
+    def is_bypassing(self) -> bool:
+        """True when device MQTT 'pass' field reports bypass active (values 2 or 3)."""
+        return self.bypass.is_active
 
     def create_entities(self) -> None:
         """Create the device entities."""
@@ -90,8 +97,6 @@ class ZendureDevice(EntityDevice):
         self.socSet = ZendureNumber(self, "socSet", self.entityWrite, None, "%", "soc", 95, 10, NumberMode.SLIDER, 10)
         self.socStatus = ZendureSensor(self, "socStatus", state=0)
         self.socLimit = ZendureSensor(self, "socLimit", state=0)
-        self.byPass = ZendureBinarySensor(self, "pass")
-
         self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", FuseGroupType.as_select_dict(), None)
         self.acMode = ZendureSelect(self, "acMode", {1: "input", 2: "output"}, self.entityWrite, 1)
         self.electricLevel = ZendureSensor(self, "electricLevel", None, "%", "battery", "measurement")
@@ -325,34 +330,15 @@ class ZendureDevice(EntityDevice):
             self.power_flow_sensor.update_value(self.power_flow_state.value)
             return
 
-        other_ports_active = (
-            (self.solarPort is not None and self.solarPort.total_raw_solar > 0)
-            or (self.offgridPort is not None and self.offgridPort.power != 0)
-        )
-
         if self.state == DeviceState.SOCFULL:
-            if self.batteryPort.is_discharging:
-                self.power_flow_state = PowerFlowState.DISCHARGE
-            elif other_ports_active:
-                self.power_flow_state = PowerFlowState.BYPASS
-            else:
-                self.power_flow_state = PowerFlowState.IDLE
-
+            self.power_flow_state = PowerFlowState.DISCHARGE if self.batteryPort.is_discharging else PowerFlowState.IDLE
         elif self.state == DeviceState.SOCEMPTY:
-            if self.batteryPort.is_charging:
-                self.power_flow_state = PowerFlowState.CHARGE
-            elif other_ports_active:
-                self.power_flow_state = PowerFlowState.BYPASS
-            else:
-                self.power_flow_state = PowerFlowState.IDLE
-
+            self.power_flow_state = PowerFlowState.CHARGE if self.batteryPort.is_charging else PowerFlowState.IDLE
         else:  # DeviceState.ACTIVE
             if self.batteryPort.is_charging:
                 self.power_flow_state = PowerFlowState.CHARGE
             elif self.batteryPort.is_discharging:
                 self.power_flow_state = PowerFlowState.DISCHARGE
-            elif other_ports_active:
-                self.power_flow_state = PowerFlowState.BYPASS
             else:
                 self.power_flow_state = PowerFlowState.IDLE
 
