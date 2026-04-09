@@ -79,6 +79,8 @@ class ZendureDevice(EntityDevice):
         self.actualKwh: float = 0.0
         self.state: DeviceState = DeviceState.OFFLINE
         self.power_flow_state: PowerFlowState = PowerFlowState.OFF
+        self.bypass_wake_time: datetime = datetime.min
+        self.wakeup_entered: datetime = datetime.min
 
         self.create_entities()
         self.bypass = BypassRelay(self)
@@ -281,6 +283,9 @@ class ZendureDevice(EntityDevice):
     async def power_charge(self, power: int) -> int:
         """Set charge power."""
         power = min(0, max(power, self.charge_limit))
+        if power == 0 and self.state == DeviceState.SOCEMPTY and self.bypass.is_active:
+            _LOGGER.debug("Power charge %s => no action [SOCEMPTY bypass hold]", self.name)
+            return self.acPort.grid_consumption
         if abs(power + self.acPort.power) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
             return self.acPort.grid_consumption
@@ -322,7 +327,8 @@ class ZendureDevice(EntityDevice):
         if self.power_flow_state == PowerFlowState.WAKEUP:
             if abs(self.batteryPort.power) <= SmartMode.POWER_START:
                 return
-            # Gerät hat geantwortet → normal klassifizieren
+            # Gerät hat geantwortet → Übergangszeitpunkt für Ramping merken
+            self.wakeup_entered = datetime.now()
         prev_state = self.power_flow_state
 
         if self.state == DeviceState.OFFLINE:
