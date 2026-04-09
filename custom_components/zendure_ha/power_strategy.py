@@ -260,6 +260,7 @@ async def _dispatch_to_mode(mgr: ZendureManager, p1: int, setpoint: int, isFast:
                 await distribute_charge(mgr, min(0, setpoint), time)
 
         case ManagerMode.MANUAL:
+            mgr.hysteresis.reset()  # MANUAL overrides cooldown — user intent takes precedence
             if (setpoint := int(mgr.manualpower.asNumber)) > 0:
                 await distribute_discharge(mgr, setpoint)
                 _LOGGER.info("Set Manual power discharging: isFast:%s, setpoint:%sW stored:%sW", isFast, setpoint, mgr.produced)

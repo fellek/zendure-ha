@@ -29,10 +29,8 @@ from .const import (
     CONF_AUTO_MQTT_USER,
     CONF_P1METER,
     DOMAIN,
-    DeviceState,
     FuseGroupType,
     ManagerMode,
-    PowerFlowState,
     SmartMode,
 )
 from .device import DeviceSettings, ZendureDevice, ZendureLegacy
@@ -347,8 +345,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # Check if devices are available (applies even without p1meterEvent during restore)
         if operation != ManagerMode.OFF and (len(self.devices) == 0 or all(not d.online for d in self.devices)):
-            _LOGGER.warning("No devices online, not possible to start the operation")
-            persistent_notification.async_create(self.hass, "No devices online, not possible to start the operation", "Zendure", "zendure_ha")
+            startup_race = len(self.devices) > 0 and all(d.lastseen == datetime.min for d in self.devices)
+            if startup_race:
+                # Devices haven't sent MQTT yet — normal at startup, operation will activate on first P1 event
+                _LOGGER.debug("Devices not yet seen (startup), operation %s stored for next P1 event", operation)
+            else:
+                _LOGGER.warning("No devices online, not possible to start the operation")
+                persistent_notification.async_create(self.hass, "No devices online, not possible to start the operation", "Zendure", "zendure_ha")
             return
 
         match self.operation:
