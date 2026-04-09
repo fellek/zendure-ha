@@ -231,7 +231,7 @@ Das Rohformat ist ein **16-Bit Zweierkomplement**, gespeichert in `uint8_t[2]`. 
 | gridInputPower | int | W | Netzeingangsleistung |
 | solarInputPower | int | W | Gesamt PV-Eingangsleistung |
 | solarPower1~6 | int | W | PV-Kanal Leistung (Kanal 1 bis 6) |
-| pass | int | — | 0: Nein, 1: Durchschleifen (Bypass) |
+| pass | int | 0–3 | Bypass-Modus (siehe Detailtabelle unten) |
 | reverseState | int | — | 0: Nein, 1: Rückspeisung (Einspeisung) |
 | socStatus | int | — | 0: Nein, 1: SOC-Kalibrierung läuft |
 | hyperTmp | int | — | Gehäusetemperatur |
@@ -266,6 +266,41 @@ Das Rohformat ist ein **16-Bit Zweierkomplement**, gespeichert in `uint8_t[2]`. 
 | is_error | int | — | 0: Ok, 1: Fehler |
 | acCouplingState | int | — | AC-Kopplungs Status (Siehe Bit-Feld Definition) |
 | dryNodeState | int | — | Trockenkontakt Status (1: Verbunden, 0: Verbunden - kann je nach Verkabelung umgekehrt sein) |
+
+#### `pass` — Bypass-Modus (Detailwerte)
+
+| Wert | Name | Bedeutung |
+|------|------|-----------|
+| 0 | BYPASS-OFF | Normalbetrieb ohne BYPASS |
+| 1 | Nicht verwendet | Nicht verwendet |
+| 2 | BYPASS-REVERSE | Überschüssiger Strom von Offgrid-Socket oder PV-Leistung wird direkt ins Netz eingespeist |
+| 3 | BYPASS-INPUT | Benötigter Strom an Offgrid-Socket wird direkt aus dem Netz gezogen |
+
+**BYPASS-OFF (0):** Gerät arbeitet im regulären Betrieb. Die Batterie kann geladen oder entladen
+werden. `inputLimit` und `outputLimit` werden vom Steuerungssystem gesetzt und akzeptiert.
+`smartMode` ist typischerweise 1.
+
+**Nicht verwendet (1):** Dieser Wert ist in der ursprünglichen SDK-Dokumentation erwähnt, wird
+vom Gerät jedoch nicht gesendet. Alle ausgewerteten Logs zeigen ausschließlich die Werte 0, 2 und 3.
+
+**BYPASS-REVERSE (2):** Das Gerät schaltet in einen Durchleitungs-Modus, bei dem überschüssige
+Energie (z. B. von einem angeschlossenen Off-Grid-Socket oder PV-Eingang) direkt ins Hausnetz
+eingespeist wird, ohne die Batterie zu nutzen. Erkennbar an: `acMode: 2` (Output),
+`gridOffPower < 0` (Einspeisung ins Off-Grid-Netz), `batcur ≈ 0 A` (keine Batterieaktivität).
+Tritt auf bei verschiedenen SOC-Leveln, häufig in Verbindung mit `socLimit: 2` (Entladestopp).
+Befehle über `inputLimit`/`outputLimit` werden ignoriert (`= 0`). `smartMode: 0`.
+
+**BYPASS-INPUT (3):** Das Gerät schaltet in einen Durchleitungs-Modus, bei dem der am
+Off-Grid-Socket benötigte Strom direkt aus dem Hausnetz (Grid) gezogen wird, ohne die Batterie zu
+nutzen. Typisch bei leerem Akku (SOC 8–25 %, `socLimit: 2`). Erkennbar an: `acMode: 1` (Input),
+`gridInputPower > 0`, `gridOffPower > 0`, `batcur ≈ −0,1` bis `−0,4 A` (uint16: 65532–65535).
+Befehle über `inputLimit`/`outputLimit` werden ignoriert (`= 0`). `smartMode: 0`.
+Das Gerät verlässt diesen Modus selbstständig nach dem Hardware-Relais-Rückübergang
+(beobachtete Wartezeit: 2–3 Minuten); Lade-/Entladebefehle werden in dieser Zeit nicht ausgeführt.
+
+> **Hinweis**: In beiden Bypass-Modi (2 und 3) gilt: `inputLimit == 0`, `outputLimit == 0`,
+> `smartMode == 0`. Das Gerät reagiert nicht auf Steuerungsbefehle. `batcur` zeigt in beiden
+> Fällen nahezu keinen Batteriestrom (0 bis −0,4 A; Rohwert uint16 → int16 / 10).
 
 ### 7.5 Geräte Daten - Lesen & Schreiben (RW)
 | Attribut | Typ | Einheit / Bereich | Beschreibung |
