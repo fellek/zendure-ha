@@ -102,6 +102,11 @@ async def mqtt_properties(device: ZendureDevice, payload: Any) -> None:
         device.totalKwh.update_value(device.kWh)
         device.availableKwh.update_value((device.electricLevel.asNumber - device.minSoc.asNumber) / 100 * device.kWh)
 
+    # Re-evaluate power flow state after every report so WAKEUP→CHARGE/DISCHARGE
+    # transitions are picked up without waiting for the next classify cycle.
+    # Must run after the entityUpdate loop above so batteryPort.power is fresh.
+    device.update_power_flow_state()
+
 
 def mqtt_message(device: ZendureDevice, topic: str, payload: Any) -> bool:
     """Route incoming MQTT topic to the appropriate handler."""
