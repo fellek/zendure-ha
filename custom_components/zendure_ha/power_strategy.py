@@ -185,6 +185,43 @@ class HysteresisFilter:
 #  Public API (called from manager.py)
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True, slots=True)
+class SystemSnapshot:
+    """Read-only result of the Assess phase.
+
+    Captures the facts `_dispatch_to_mode` and the Phase 3 `_decide` need to
+    make a decision: the raw setpoint (before hysteresis/capping), aggregate
+    production/storage, and the wall-clock `time` the assessment was taken at.
+    Intentionally minimal — device-level snapshots arrive in Phase 3.
+    """
+
+    setpoint_raw: int
+    available_kwh: float
+    power: int
+    time: datetime
+
+
+def _recover_wake_timeouts(devices: list, time: datetime) -> list:
+    """Revert devices stuck in WAKEUP past SmartMode.WAKE_TIMEOUT back to IDLE.
+
+    Returns the list of devices that were recovered (for logging/tests). This
+    is the self-healing path for the sticky-WAKEUP bug: if a wake command
+    never produced a battery response within the timeout, the device is
+    reclassified as IDLE so the next cycle can re-command it.
+    """
+    recovered = []
+    deadline = timedelta(seconds=SmartMode.WAKE_TIMEOUT)
+    for d in devices:
+        if d.power_flow_state != PowerFlowState.WAKEUP:
+            continue
+        if time - d.wake_started_at > deadline:
+            _LOGGER.info("Wake timeout: %s stuck in WAKEUP for %ss => reverting to IDLE",
+                         d.name, (time - d.wake_started_at).total_seconds())
+            d.power_flow_state = PowerFlowState.IDLE
+            recovered.append(d)
+    return recovered
+
+
 def reset_power_state(mgr: ZendureManager) -> None:
     """Reset all power distribution lists and counters before recalculating."""
     mgr.zero_fast = datetime.max
@@ -205,16 +242,35 @@ def reset_power_state(mgr: ZendureManager) -> None:
 
 async def classify_and_dispatch(mgr: ZendureManager, p1: int, isFast: bool, time: datetime) -> None:
     """Classify devices into charge/discharge/idle and dispatch to the active mode."""
-    setpoint, available_kwh, power = await _classify_devices(mgr)
+    snapshot = await _assess(mgr, p1, time)
     _update_group_limits(mgr)
 
-    mgr.power.update_value(power)
-    mgr.availableKwh.update_value(available_kwh)
+    mgr.power.update_value(snapshot.power)
+    mgr.availableKwh.update_value(snapshot.available_kwh)
 
+    setpoint = snapshot.setpoint_raw
     if mgr.discharge_bypass > 0:
         setpoint = max(0 if p1 >= 0 else setpoint - mgr.discharge_bypass, setpoint - mgr.discharge_bypass)
     _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, mgr.produced)
     await _dispatch_to_mode(mgr, p1, setpoint, isFast, time)
+
+
+async def _assess(mgr: ZendureManager, _p1: int, time: datetime) -> SystemSnapshot:
+    """Assess phase: self-heal WAKE_TIMEOUT, classify devices, build a snapshot.
+
+    The single mutation here is `_recover_wake_timeouts`: it reverts stuck
+    WAKEUP devices to IDLE *before* classification so the recovered device
+    participates in the same cycle's dispatch. Everything else the snapshot
+    captures is pure read.
+    """
+    _recover_wake_timeouts(mgr.devices, time)
+    setpoint, available_kwh, power = await _classify_devices(mgr)
+    return SystemSnapshot(
+        setpoint_raw=setpoint,
+        available_kwh=available_kwh,
+        power=power,
+        time=time,
+    )
 
 
 # ---------------------------------------------------------------------------
