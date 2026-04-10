@@ -58,29 +58,82 @@ class Direction(Enum):
     DISCHARGE = +1
 
 
+class Command(Enum):
+    """Typed device command.
+
+    CHARGE/DISCHARGE route to the obvious methods with a signed power.
+    STOP_CHARGE and STOP_DISCHARGE are the *quirk-aware* stop commands: the
+    SF 2400 AC misreports its direction after a plain `power_charge(0)` stop
+    on an actively-charging device and re-enters the charging loop. The only
+    safe way to stop a charging SF 2400 is `power_discharge(0 or 10)`; the
+    symmetric case applies to stopping a discharging device. Using these
+    enum values ensures a stop can never silently collapse back to
+    `power_charge(0)` in the call site.
+    """
+
+    CHARGE = 1
+    DISCHARGE = 2
+    STOP_CHARGE = 3
+    STOP_DISCHARGE = 4
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceAssignment:
+    """One device's command for one dispatch cycle.
+
+    `power` is the signed value the distribution math produced; for STOP_*
+    commands it is ignored and the 0/POWER_IDLE_OFFSET decision is made in
+    `apply_assignment` based on the device's offgrid load.
+    """
+
+    command: Command
+    power: int = 0
+
+
+async def apply_assignment(d: Any, assignment: DeviceAssignment) -> int:
+    """Single mutation site for device commands.
+
+    Returns the actual power commanded (same contract as `power_charge` /
+    `power_discharge`). Every stop path routes through here, so the SF 2400
+    quirk is enforced structurally: a `STOP_CHARGE` can never emit
+    `power_charge(0)`.
+    """
+    cmd = assignment.command
+    if cmd == Command.CHARGE:
+        return await d.power_charge(assignment.power)
+    if cmd == Command.DISCHARGE:
+        return await d.power_discharge(assignment.power)
+
+    offgrid_consumption = d.offgridPort.consumption if d.offgridPort else 0
+    if cmd == Command.STOP_CHARGE:
+        # SF 2400 quirk: a charging device must be stopped via power_discharge.
+        stop_pwr = SmartMode.POWER_IDLE_OFFSET if offgrid_consumption > 0 else 0
+        return await d.power_discharge(stop_pwr)
+    # STOP_DISCHARGE: symmetric — stop a discharging device via power_charge.
+    stop_pwr = -SmartMode.POWER_IDLE_OFFSET if offgrid_consumption > 0 else 0
+    return await d.power_charge(stop_pwr)
+
+
 @dataclass
 class HysteresisFilter:
-    """Tracks hysteresis state for power distribution.
+    """Mode-aware hysteresis state for power distribution.
 
-    Two APIs coexist during the rewrite:
-
-    - Legacy: `charge_time`, `reset()`, `reset_accumulator()`, `apply_charge_cooldown()`,
-      `apply_device_suppression()`, `accumulator` — still used by distribute_*/
-      _dispatch_to_mode in Phases 1–2.
-    - New: `filter(setpoint, direction, mode, time)` — mode-aware, no sentinels,
-      self-contained. Will replace the legacy API once _decide/_apply land in Phase 3.
+    Two distinct responsibilities:
+    - Cooldown filter via `filter()`: arms on CHARGE<->DISCHARGE transitions,
+      passes through in MANUAL. No sentinel values, no re-arm loop.
+    - Per-device suppression via `apply_device_suppression()` + `accumulator`:
+      accumulates deficit when a device keeps getting less than its start
+      threshold and eventually suppresses it entirely.
     """
 
     accumulator: int = 0
-    charge_time: datetime = field(default_factory=lambda: datetime.max)
-    charge_last: datetime = field(default_factory=lambda: datetime.min)
 
     _cooldown_until: datetime = field(default_factory=lambda: datetime.min)
     _last_direction: Direction = Direction.NONE
     _last_nonidle_time: datetime = field(default_factory=lambda: datetime.min)
 
     def filter(self, setpoint: int, direction: Direction, mode: ManagerMode, time: datetime) -> int:
-        """Mode-aware setpoint filter — the Phase 3 replacement for apply_charge_cooldown.
+        """Mode-aware setpoint filter.
 
         Rules:
         - MANUAL: user intent wins, cooldown is cleared and setpoint passed through.
@@ -90,8 +143,8 @@ class HysteresisFilter:
         - While cooldown is active: return 0.
         - Otherwise: pass setpoint through.
 
-        No `datetime.max` sentinel, no re-arm loop: uninitialized state is
-        `datetime.min`, which is always in the past.
+        Uninitialized state is `datetime.min`, which is always in the past — so a
+        fresh filter never swallows the first setpoint.
         """
         if mode == ManagerMode.MANUAL:
             self._last_direction = direction
@@ -116,34 +169,9 @@ class HysteresisFilter:
             return 0
         return setpoint
 
-    def reset(self) -> None:
-        """Reset all hysteresis state (e.g. on mode switch to discharge)."""
-        self.accumulator = 0
-        self.charge_time = datetime.max
-        self.charge_last = datetime.min
-
     def reset_accumulator(self) -> None:
-        """Reset only the accumulator (e.g. after waking idle devices)."""
+        """Zero only the per-device deficit accumulator (e.g. after a wake command)."""
         self.accumulator = 0
-
-    def apply_charge_cooldown(self, setpoint: int, time: datetime, power_flow_sensor: Any) -> int:
-        """Apply cooldown hysteresis before allowing charge. Returns adjusted setpoint."""
-        if self.charge_time > time:
-            if self.charge_time == datetime.max:
-                cooldown = (
-                    SmartMode.HYSTERESIS_FAST_COOLDOWN
-                    if (time - self.charge_last).total_seconds() > SmartMode.HYSTERESIS_LONG_COOLDOWN
-                    else SmartMode.HYSTERESIS_SLOW_COOLDOWN
-                )
-                self.charge_time = time + timedelta(seconds=cooldown)
-                self.charge_last = self.charge_time
-                self.accumulator = 0
-                _LOGGER.debug("Charge: hysteresis started, cooldown=%ss, charge_time=%s", cooldown, self.charge_time)
-            _LOGGER.debug("Charge: hysteresis active, setpoint %s => 0 (waiting until %s)", setpoint, self.charge_time)
-            return 0
-        else:
-            power_flow_sensor.update_value(PowerFlowState.CHARGE.value if setpoint < 0 else PowerFlowState.IDLE.value)
-            return setpoint
 
     def apply_device_suppression(self, pwr: int, is_charge: bool, start: int, optimal: int, state: DeviceState, label: str, name: str) -> int:
         """Apply per-device hysteresis to suppress underpowered devices.
@@ -402,9 +430,8 @@ async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) 
             _LOGGER.debug("Charge: promote discharge %s => charge (pwr_max=%s, charge_limit=%s, soc=%s)",
                            d.name, d.pwr_max, d.charge_limit, d.electricLevel.asInt)
         else:
-            stop_pwr = 0 if d.offgrid_power == 0 else -SmartMode.POWER_IDLE_OFFSET
-            _LOGGER.debug("Charge: stop discharge %s => power_charge(%s) [SOCFULL, offgrid=%s]", d.name, stop_pwr, d.offgrid_power)
-            await d.power_charge(stop_pwr)
+            _LOGGER.debug("Charge: stop discharge %s [SOCFULL, offgrid=%s]", d.name, d.offgrid_power)
+            await apply_assignment(d, DeviceAssignment(Command.STOP_DISCHARGE))
 
     await _distribute_power(mgr, active_devices, setpoint, CHARGE_DIR, time)
 
@@ -415,17 +442,13 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int) -> None:
     mgr.power_flow_sensor.update_value(
         PowerFlowState.DISCHARGE.value if setpoint > 0 and mgr.discharge else PowerFlowState.IDLE.value)
 
-    # Reset charge hysteresis on mode switch
-    if mgr.hysteresis.charge_time != datetime.max:
-        mgr.hysteresis.reset()
-
     # Stop charging devices (but never discharge SOCEMPTY or near-empty devices)
     for d in mgr.charge:
         if d.state == DeviceState.SOCEMPTY:
             continue
         if d.electricLevel.asInt <= int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER:
             continue
-        await d.power_discharge(0 if (d.offgridPort.consumption if d.offgridPort else 0) == 0 else SmartMode.POWER_IDLE_OFFSET)
+        await apply_assignment(d, DeviceAssignment(Command.STOP_CHARGE))
 
     # Cold-start wakeup: kein aktives Discharge-Gerät, aber Bedarf vorhanden
     if not mgr.discharge and mgr.idle and setpoint > SmartMode.POWER_IDLE_OFFSET:
@@ -465,9 +488,13 @@ async def _distribute_power(
 
     total_limit, total_weight, optimal = _compute_weights(devices, is_charge)
 
-    # Charge hysteresis (cooldown before allowing charge) — bypassed in MANUAL (user intent wins)
-    if is_charge and time and mgr.operation != ManagerMode.MANUAL:
-        setpoint = mgr.hysteresis.apply_charge_cooldown(setpoint, time, mgr.power_flow_sensor)
+    # Charge hysteresis (cooldown before allowing charge). HysteresisFilter.filter()
+    # handles the MANUAL bypass internally — no need for an ad-hoc guard here.
+    if is_charge and time is not None:
+        setpoint = mgr.hysteresis.filter(setpoint, Direction.CHARGE, mgr.operation, time)
+        mgr.power_flow_sensor.update_value(
+            PowerFlowState.CHARGE.value if setpoint < 0 else PowerFlowState.IDLE.value,
+        )
 
     dev_start = _compute_wakeup_threshold(setpoint, optimal, is_charge, mgr)
     raw_setpoint = setpoint  # save before capping; used as surplus ceiling in wakeup passes
