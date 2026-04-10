@@ -260,7 +260,6 @@ async def _dispatch_to_mode(mgr: ZendureManager, p1: int, setpoint: int, isFast:
                 await distribute_charge(mgr, min(0, setpoint), time)
 
         case ManagerMode.MANUAL:
-            mgr.hysteresis.reset()  # MANUAL overrides cooldown — user intent takes precedence
             if (setpoint := int(mgr.manualpower.asNumber)) > 0:
                 await distribute_discharge(mgr, setpoint)
                 _LOGGER.info("Set Manual power discharging: isFast:%s, setpoint:%sW stored:%sW", isFast, setpoint, mgr.produced)
@@ -353,8 +352,8 @@ async def _distribute_power(
 
     total_limit, total_weight, optimal = _compute_weights(devices, is_charge)
 
-    # Charge hysteresis (cooldown before allowing charge)
-    if is_charge and time:
+    # Charge hysteresis (cooldown before allowing charge) — bypassed in MANUAL (user intent wins)
+    if is_charge and time and mgr.operation != ManagerMode.MANUAL:
         setpoint = mgr.hysteresis.apply_charge_cooldown(setpoint, time, mgr.power_flow_sensor)
 
     dev_start = _compute_wakeup_threshold(setpoint, optimal, is_charge, mgr)
@@ -559,8 +558,8 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt, reverse=True):
             if d in pass1_woken:
                 continue  # Pass 1 already handled this device this iteration
-            if d.power_flow_state == PowerFlowState.WAKEUP:
-                continue  # already waiting for battery to respond
+            if d.power_flow_state == PowerFlowState.WAKEUP and mgr.operation != ManagerMode.MANUAL:
+                continue  # already waiting for battery to respond (MANUAL re-commands anyway)
             offgrid_load = d.offgridPort.consumption if d.offgridPort else 0
             if d.state == DeviceState.SOCFULL:
                 await d.power_charge(-offgrid_load)
