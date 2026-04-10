@@ -38,7 +38,7 @@ from .entity import EntityDevice
 from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
 from . import power_strategy
-from .power_strategy import HysteresisState
+from .power_strategy import HysteresisFilter
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureSensor
 from .power_port import DcSolarPowerPort, GridPowerPort, OffGridPowerPort, PowerPort
@@ -88,7 +88,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.idle_lvlmin = 0
         self.produced = 0
 
-        self.hysteresis = HysteresisState()
+        self.hysteresis = HysteresisFilter()
 
         self.device_ports: dict[str, list[PowerPort]] = {}
 

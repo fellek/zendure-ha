@@ -1,18 +1,38 @@
-"""Power distribution strategy: classification, charge/discharge distribution.
+"""Power distribution strategy: assess, classify, dispatch.
+
+Cycle shape (one call per dispatch tick):
+
+    classify_and_dispatch(mgr, p1, isFast, time)
+      └─ _assess(mgr, p1, time) -> SystemSnapshot
+           ├─ _recover_wake_timeouts()   # self-heals stuck WAKEUP
+           └─ _classify_devices()        # sorts devices into charge / discharge / idle
+      └─ _update_group_limits(mgr)       # per-FuseGroup pwr_max caps
+      └─ _dispatch_to_mode(...)          # mode → distribute_charge / distribute_discharge
 
 Key components:
-- classify_and_dispatch(): main entry point per cycle
-- distribute_charge() / distribute_discharge(): entry points for each direction
-- _distribute_power(): proportional weight-based distribution across active devices
-- _wake_idle_devices(): two-pass wakeup (Pass 1: bypass-energy, Pass 2: grid-demand)
-- _ramp_factor(): soft-start factor for post-wakeup, near-minSoc, and near-maxSoc transitions
-- HysteresisFilter: prevents rapid on/off cycling (legacy API used by distribute_*; new
-  `filter()` method is the mode-aware replacement that will subsume the legacy methods
-  once _decide/_apply take over in Phase 3)
+- SystemSnapshot: read-only carrier of the assess results (setpoint_raw, power,
+  available_kwh, time). Passed through classify_and_dispatch.
+- HysteresisFilter: mode-aware cooldown filter (`filter()`) plus the per-device
+  deficit accumulator (`apply_device_suppression()`). No datetime sentinels —
+  MANUAL bypasses, CHARGE<->DISCHARGE arms a cooldown, everything else passes.
+- Command / DeviceAssignment / apply_assignment: typed command boundary. Every
+  stop command routes through apply_assignment, which enforces the SF 2400
+  quirk: STOP_CHARGE becomes power_discharge(0 or POWER_IDLE_OFFSET), never
+  power_charge(0).
+- distribute_charge / distribute_discharge: direction-specific dispatch; both
+  delegate the proportional math to _distribute_power.
+- _distribute_power: proportional weight-based distribution across active devices.
+- _wake_idle_devices: two-pass wakeup (Pass 1: bypass-energy, Pass 2: grid-demand).
+- _ramp_factor: soft-start factor for post-wakeup, near-minSoc, near-maxSoc.
 
-Wakeup rules:
+Self-healing WAKEUP:
+- A device stuck in PowerFlowState.WAKEUP past SmartMode.WAKE_TIMEOUT is reverted
+  to IDLE at the start of the next assess cycle so it can be re-commanded.
+- wake_started_at on ZendureDevice is the single source of truth for the timer.
+
+Wakeup rules (inside _wake_idle_devices):
 - wakeup commands are capped to the available surplus (raw_setpoint before hw-cap)
-- pass1_woken guard: each device is woken at most once per cycle (no double-command)
+- pass1_woken guard: each device is woken at most once per cycle
 - Ramping: ramp_factor is applied only in three specific scenarios — never globally
 """
 
