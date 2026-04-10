@@ -3,15 +3,43 @@
 Fakes are intentionally minimal: each phase of the rewrite extends them
 as tests demand. Do not add attributes speculatively — only what a real
 test touches.
+
+Import shim: the real `custom_components.zendure_ha.__init__` imports
+`device.py`, which pulls in Home Assistant's bluetooth stack and blows up
+in a bare test env. We register an empty stub package so tests can
+`from custom_components.zendure_ha.power_strategy import ...` and only
+the modules actually under test get loaded.
 """
 
 from __future__ import annotations
 
+import sys
+import types
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_PKG_PATH = _REPO_ROOT / "custom_components" / "zendure_ha"
+
+
+def _install_stub_package() -> None:
+    parent = "custom_components"
+    child = "custom_components.zendure_ha"
+    if parent not in sys.modules:
+        pkg = types.ModuleType(parent)
+        pkg.__path__ = [str(_REPO_ROOT / "custom_components")]
+        sys.modules[parent] = pkg
+    if child not in sys.modules:
+        sub = types.ModuleType(child)
+        sub.__path__ = [str(_PKG_PATH)]
+        sys.modules[child] = sub
+
+
+_install_stub_package()
 
 
 @dataclass

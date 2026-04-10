@@ -6,7 +6,9 @@ Key components:
 - _distribute_power(): proportional weight-based distribution across active devices
 - _wake_idle_devices(): two-pass wakeup (Pass 1: bypass-energy, Pass 2: grid-demand)
 - _ramp_factor(): soft-start factor for post-wakeup, near-minSoc, and near-maxSoc transitions
-- HysteresisState: prevents rapid on/off cycling
+- HysteresisFilter: prevents rapid on/off cycling (legacy API used by distribute_*; new
+  `filter()` method is the mode-aware replacement that will subsume the legacy methods
+  once _decide/_apply take over in Phase 3)
 
 Wakeup rules:
 - wakeup commands are capped to the available surplus (raw_setpoint before hw-cap)
@@ -19,6 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from .const import DeviceState, ManagerMode, PowerFlowState, SmartMode
@@ -47,17 +50,71 @@ DISCHARGE_DIR = _DistDirection("Discharge", +1, False)
 #  Hysteresis state: prevents rapid on/off cycling of devices
 # ---------------------------------------------------------------------------
 
+class Direction(Enum):
+    """Power flow direction used by HysteresisFilter.filter() and (later) _decide."""
+
+    NONE = 0
+    CHARGE = -1
+    DISCHARGE = +1
+
+
 @dataclass
-class HysteresisState:
+class HysteresisFilter:
     """Tracks hysteresis state for power distribution.
 
-    - charge_cooldown: prevents immediate re-charging after a charge stop
-    - accumulator (pwr_low): tracks underutilization to shut down unnecessary devices
+    Two APIs coexist during the rewrite:
+
+    - Legacy: `charge_time`, `reset()`, `reset_accumulator()`, `apply_charge_cooldown()`,
+      `apply_device_suppression()`, `accumulator` — still used by distribute_*/
+      _dispatch_to_mode in Phases 1–2.
+    - New: `filter(setpoint, direction, mode, time)` — mode-aware, no sentinels,
+      self-contained. Will replace the legacy API once _decide/_apply land in Phase 3.
     """
 
     accumulator: int = 0
     charge_time: datetime = field(default_factory=lambda: datetime.max)
     charge_last: datetime = field(default_factory=lambda: datetime.min)
+
+    _cooldown_until: datetime = field(default_factory=lambda: datetime.min)
+    _last_direction: Direction = Direction.NONE
+    _last_nonidle_time: datetime = field(default_factory=lambda: datetime.min)
+
+    def filter(self, setpoint: int, direction: Direction, mode: ManagerMode, time: datetime) -> int:
+        """Mode-aware setpoint filter — the Phase 3 replacement for apply_charge_cooldown.
+
+        Rules:
+        - MANUAL: user intent wins, cooldown is cleared and setpoint passed through.
+        - Direction switch (CHARGE <-> DISCHARGE): arm a cooldown whose length depends
+          on how long ago the last non-idle cycle was (fast if >LONG_COOLDOWN ago,
+          slow otherwise).
+        - While cooldown is active: return 0.
+        - Otherwise: pass setpoint through.
+
+        No `datetime.max` sentinel, no re-arm loop: uninitialized state is
+        `datetime.min`, which is always in the past.
+        """
+        if mode == ManagerMode.MANUAL:
+            self._last_direction = direction
+            self._cooldown_until = datetime.min
+            if direction != Direction.NONE:
+                self._last_nonidle_time = time
+            return setpoint
+
+        if direction != Direction.NONE:
+            if self._last_direction not in (Direction.NONE, direction):
+                gap = (time - self._last_nonidle_time).total_seconds()
+                cooldown_s = (
+                    SmartMode.HYSTERESIS_FAST_COOLDOWN
+                    if gap > SmartMode.HYSTERESIS_LONG_COOLDOWN
+                    else SmartMode.HYSTERESIS_SLOW_COOLDOWN
+                )
+                self._cooldown_until = time + timedelta(seconds=cooldown_s)
+            self._last_direction = direction
+            self._last_nonidle_time = time
+
+        if time < self._cooldown_until:
+            return 0
+        return setpoint
 
     def reset(self) -> None:
         """Reset all hysteresis state (e.g. on mode switch to discharge)."""
@@ -516,9 +573,9 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
         for d in mgr.idle:
             if not _need_wakeup(d):
                 continue
-            if datetime.now() < d.bypass_wake_time + _cooldown:
+            if datetime.now() < d.wake_started_at + _cooldown:
                 _LOGGER.debug("Bypass-wake %s: cooldown active (next at %s)",
-                              d.name, d.bypass_wake_time + _cooldown)
+                              d.name, d.wake_started_at + _cooldown)
                 continue
             solar        = d.solarPort.total_raw_solar if d.solarPort else 0
             offgrid_in   = d.offgridPort.feed_in       if d.offgridPort else 0
@@ -535,7 +592,7 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
                 _LOGGER.debug("Bypass-wake SOCEMPTY %s => power_charge(%s) [bypass=%s offgrid_load=%s]",
                               d.name, pwr, bypass_available, offgrid_load)
                 await d.power_charge(pwr)
-                d.bypass_wake_time = datetime.now()
+                d.wake_started_at = datetime.now()
                 d.power_flow_state = PowerFlowState.WAKEUP
                 pass1_woken.add(d)
 
@@ -544,7 +601,7 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
                 _LOGGER.debug("Bypass-wake SOCFULL %s => power_discharge(%s) [bypass=%s offgrid_load=%s]",
                               d.name, pwr, bypass_available, offgrid_load)
                 await d.power_discharge(pwr)
-                d.bypass_wake_time = datetime.now()
+                d.wake_started_at = datetime.now()
                 d.power_flow_state = PowerFlowState.WAKEUP
                 pass1_woken.add(d)
 

@@ -79,7 +79,7 @@ class ZendureDevice(EntityDevice):
         self.actualKwh: float = 0.0
         self.state: DeviceState = DeviceState.OFFLINE
         self.power_flow_state: PowerFlowState = PowerFlowState.OFF
-        self.bypass_wake_time: datetime = datetime.min
+        self.wake_started_at: datetime = datetime.min
         self.wakeup_entered: datetime = datetime.min
 
         self.create_entities()

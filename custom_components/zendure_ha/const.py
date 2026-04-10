@@ -106,6 +106,7 @@ class SmartMode:
     POWER_TOLERANCE = 10  # Device-level power tolerance (W) before updating
     BYPASS_WAKE_COOLDOWN = 60  # Seconds between bypass-wake Pass 1 commands per device
     WAKEUP_RAMP_DURATION = 30  # Seconds of soft-start ramp after WAKEUP→CHARGE/DISCHARGE transition
+    WAKE_TIMEOUT = 15  # Seconds a device may remain in WAKEUP before being re-classified as IDLE
 
     # ====================================================================
     # NEU: Power Distribution & Hysteresis Konstanten
