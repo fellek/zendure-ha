@@ -343,6 +343,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         self.operation = operation
 
+        #@todo: startup-race is not solved
+        #2026-04-12 09:14:32.048 DEBUG (ImportExecutor_0) [custom_components.zendure_ha.entity] Entity empty has no device, skipping initialization.
+        #2026-04-12 09:14:32.322 INFO (MainThread) [custom_components.zendure_ha.manager] Update operation: ManagerMode.MATCHING from: ManagerMode.OFF
+        #2026-04-12 09:14:32.323 WARNING (MainThread) [custom_components.zendure_ha.manager] No devices online, not possible to start the operation
+
         # Check if devices are available (applies even without p1meterEvent during restore)
         if operation != ManagerMode.OFF and (len(self.devices) == 0 or all(not d.online for d in self.devices)):
             startup_race = len(self.devices) > 0 and all(d.lastseen == datetime.min for d in self.devices)
