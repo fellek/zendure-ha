@@ -27,6 +27,7 @@ from . import ble as ble_transport
 from . import mqtt_protocol
 from .battery import ZendureBattery
 from .power_port import PowerPort, AcPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort
+from .fusegroup import FuseGroup
 
 if TYPE_CHECKING:
     from .api import ZendureApi
@@ -42,7 +43,7 @@ class ZendureDevice(EntityDevice):
 
     def __init__(self, hass: HomeAssistant, deviceId: str, name: str, model: str, definition: dict[str, str], parent: str | None = None) -> None:
         """Initialize Device."""
-        from .fusegroup import FuseGroup
+        self.fuseGrp = None
 
         """Initialize Device."""
         self.prodkey = definition["productKey"]
@@ -63,6 +64,7 @@ class ZendureDevice(EntityDevice):
         self.batteries: dict[str, ZendureBattery | None] = {}
         self.lastseen = datetime.min
         self._messageid = 0
+        # @todo rename to capacity?
         self.kWh = 0.0
 
         self.charge_limit: int = 0
@@ -73,9 +75,11 @@ class ZendureDevice(EntityDevice):
         self.discharge_start: int = 0
         self.maxSolar = 0
         self._has_offgrid = False
+        self._is_dc_out = False
         self.pv_port_count: int = 1  # <-- NEU: Standard ist 1 PV-Port
         self.solar_inputs: list[ZendureSensor] = [] # <-- NEU: Speichert alle PV-Sensoren
         self.pwr_max: int = 0
+        # @todo rename to capacity?
         self.actualKwh: float = 0.0
         self.state: DeviceState = DeviceState.OFFLINE
         self.power_flow_state: PowerFlowState = PowerFlowState.OFF
@@ -133,6 +137,7 @@ class ZendureDevice(EntityDevice):
         self.solarPort: DcSolarPowerPort | None = None
         self.offgridPort: OffGridPowerPort | None = None
 
+        # @todo rename to ConnectorPowerPort, damit ist dann sowohl der DC Ausgang, als auch der AC Ausgang gemeint. Ein DC Ausgang ist vermutlich nur in Entladerichtung nutzbar, dies muss verifiziert werden.
         # 0. AC Grid Port: Jedes Gerät hat eine AC-Netzverbindung
         self.acPort = AcPowerPort(self)
         self.ports.append(self.acPort)
@@ -157,6 +162,7 @@ class ZendureDevice(EntityDevice):
             self.offgridPort = OffGridPowerPort(self)
             self.ports.append(self.offgridPort)
 
+    # @todo introduce new CONST for C-Rate as charge_optimum
     def setLimits(self, charge: int, discharge: int) -> None:
         """Set the device limits."""
         try:
@@ -323,9 +329,9 @@ class ZendureDevice(EntityDevice):
 
     def update_power_flow_state(self) -> None:
         """Bestimmt den Ist-Zustand basierend auf Port-Daten."""
-        # WAKEUP bleibt, bis abs(batteryPort.power) > POWER_START
+        # WAKEUP bleibt, bis abs(batteryPort.power) > POWER_IDLE_OFFSET
         if self.power_flow_state == PowerFlowState.WAKEUP:
-            if abs(self.batteryPort.power) <= SmartMode.POWER_START:
+            if abs(self.batteryPort.power) <= SmartMode.POWER_IDLE_OFFSET:
                 return
             # Gerät hat geantwortet → Übergangszeitpunkt für Ramping merken
             self.wakeup_entered = datetime.now()
