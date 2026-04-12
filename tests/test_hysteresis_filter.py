@@ -70,3 +70,34 @@ def test_same_direction_repeated_does_not_rearm(t0: datetime) -> None:
     f = HysteresisFilter()
     for i in range(5):
         assert f.filter(-500, Direction.CHARGE, ManagerMode.MATCHING, t0 + timedelta(seconds=i)) == -500
+
+
+def test_sub_deadband_setpoint_is_swallowed(t0: datetime) -> None:
+    """A |setpoint| below POWER_START is noise — must not flip the direction.
+
+    Regression: a 6W blip on MATCHING during discharge previously flipped the
+    tracked direction to CHARGE. The deadband now returns 0 and leaves
+    `_last_direction` untouched.
+    """
+    f = HysteresisFilter()
+    assert f.filter(+500, Direction.DISCHARGE, ManagerMode.MATCHING, t0) == 500
+    # Tiny opposite-direction blip must return 0 and NOT arm a cooldown.
+    blip_time = t0 + timedelta(seconds=2)
+    assert f.filter(-6, Direction.CHARGE, ManagerMode.MATCHING, blip_time) == 0
+    # Next real discharge cycle must pass through unchanged (no spurious arm).
+    next_cycle = t0 + timedelta(seconds=3)
+    assert f.filter(+500, Direction.DISCHARGE, ManagerMode.MATCHING, next_cycle) == 500
+
+
+def test_discharge_to_charge_transition_is_tracked(t0: datetime) -> None:
+    """Filter must see both directions so CHARGE<->DISCHARGE transitions arm the cooldown.
+
+    Regression: _distribute_power only called filter on the charge path, so
+    `_last_direction` never advanced to DISCHARGE and the first charge cycle
+    after a real discharge run did not arm any cooldown.
+    """
+    f = HysteresisFilter()
+    # Real discharge run updates _last_direction.
+    assert f.filter(+500, Direction.DISCHARGE, ManagerMode.MATCHING, t0) == 500
+    # A real charge cycle (above the deadband) must now arm cooldown and return 0.
+    assert f.filter(-500, Direction.CHARGE, ManagerMode.MATCHING, t0 + timedelta(seconds=1)) == 0
