@@ -29,6 +29,7 @@ class PowerPort(ABC):
         pass
 
 
+# @ todo rename to GridSmartMeter()
 class GridPowerPort(PowerPort):
     """Representiert den P1 Zähler (AC Strom vom Netz)."""
 
@@ -145,12 +146,8 @@ class DcSolarPowerPort(PowerPort):
 
     @property
     def power(self) -> int:
-        """
-        Für die Basis-Setpoint-Berechnung ist DC Solar "unsichtbar",
-        da der Wechselrichter den Solarstrom automatisch durchreicht
-        (P1 reagiert darauf ohnehin).
-        """
-        return 0
+
+        return self.total_raw_solar
 
     @property
     def total_raw_solar(self) -> int:
