@@ -300,6 +300,12 @@
       "solar_power4": {
         "name": "PV4 Solarleistung"
       },
+      "solar_power5": {
+        "name": "PV5 Solarleistung"
+      },
+      "solar_power6": {
+        "name": "PV6 Solarleistung"
+      },
       "output_home_power": {
         "name": "Haus-Ausgangsleistung"
       },
