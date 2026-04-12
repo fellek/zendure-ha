@@ -29,9 +29,8 @@ from .const import (
     CONF_AUTO_MQTT_USER,
     CONF_P1METER,
     DOMAIN,
-    DeviceState,
+    FuseGroupType,
     ManagerMode,
-    ManagerState,
     SmartMode,
 )
 from .device import DeviceSettings, ZendureDevice, ZendureLegacy
@@ -39,7 +38,7 @@ from .entity import EntityDevice
 from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
 from . import power_strategy
-from .power_strategy import HysteresisState
+from .power_strategy import HysteresisFilter
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureSensor
 from .power_port import DcSolarPowerPort, GridPowerPort, OffGridPowerPort, PowerPort
@@ -72,8 +71,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_factor = 1
         self.update_count = 0
 
-        self.socempty: list[ZendureDevice] = []
-
         self.charge: list[ZendureDevice] = []
         self.charge_limit = 0
         self.charge_optimal = 0
@@ -91,7 +88,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.idle_lvlmin = 0
         self.produced = 0
 
-        self.hysteresis = HysteresisState()
+        self.hysteresis = HysteresisFilter()
 
         self.device_ports: dict[str, list[PowerPort]] = {}
 
@@ -143,7 +140,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"},
             self.update_operation
         )
-        self.operationstate = ZendureSensor(self, "operation_state")
+        self.power_flow_sensor = ZendureSensor(self, "power_flow_state")
         self.manualpower = ZendureRestoreNumber(
             self, "manual_power", None, None, "W", "power", 12000, -12000,
             NumberMode.BOX, True
@@ -293,32 +290,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 if device.fuseGroup.onchanged is None:
                     device.fuseGroup.onchanged = updateFuseGroup
 
-                fg: FuseGroup | None = None
-                match device.fuseGroup.state:
-                    case "owncircuit" | "group3600":
-                        fg = FuseGroup(device.name, 3600, -3600)
-                    case "group800":
-                        fg = FuseGroup(device.name, 800, -1200)
-                    case "group800_2400":
-                        fg = FuseGroup(device.name, 800, -2400)
-                    case "group1200":
-                        fg = FuseGroup(device.name, 1200, -1200)
-                    case "group2000":
-                        fg = FuseGroup(device.name, 2000, -2000)
-                    case "group2400":
-                        fg = FuseGroup(device.name, 2400, -2400)
-                    case "unused":
-                        # only switch off, if Manager is used
-                        if self.operation != ManagerMode.OFF:
-                            await device.power_off()
-                        continue
-                    case _:
-                        _LOGGER.debug("Device %s has unsupported fuseGroup state: %s", device.name, device.fuseGroup.state)
-                        continue
-
-                if fg is not None:
-                    fg.devices.append(device)
-                    fuse_groups[device.deviceId] = fg
+                fgt = FuseGroupType.from_label(device.fuseGroup.state)
+                if fgt is None:
+                    _LOGGER.debug("Device %s has unsupported fuseGroup state: %s", device.name, device.fuseGroup.state)
+                    continue
+                if fgt is FuseGroupType.UNUSED:
+                    if self.operation != ManagerMode.OFF:
+                        await device.power_off()
+                    continue
+                fg = FuseGroup(device.name, fgt.maxpower, fgt.minpower)
+                fg.devices.append(device)
+                fuse_groups[device.deviceId] = fg
             except AttributeError as err:
                 _LOGGER.error("Device %s missing fuseGroup attribute: %s", device.name, err)
             except Exception as err:
@@ -327,16 +309,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Update the fusegroups and select optins for each device
         for device in self.devices:
             try:
-                fusegroups: dict[Any, str] = {
-                    0: "unused",
-                    1: "owncircuit",
-                    2: "group800",
-                    3: "group800_2400",
-                    4: "group1200",
-                    5: "group2000",
-                    6: "group2400",
-                    7: "group3600",
-                }
+                fusegroups: dict[Any, str] = FuseGroupType.as_select_dict()
                 for deviceId, fg in fuse_groups.items():
                     if deviceId != device.deviceId:
                         fusegroups[deviceId] = f"Part of {fg.name} fusegroup"
@@ -370,10 +343,20 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         self.operation = operation
 
+        #@todo: startup-race is not solved
+        #2026-04-12 09:14:32.048 DEBUG (ImportExecutor_0) [custom_components.zendure_ha.entity] Entity empty has no device, skipping initialization.
+        #2026-04-12 09:14:32.322 INFO (MainThread) [custom_components.zendure_ha.manager] Update operation: ManagerMode.MATCHING from: ManagerMode.OFF
+        #2026-04-12 09:14:32.323 WARNING (MainThread) [custom_components.zendure_ha.manager] No devices online, not possible to start the operation
+
         # Check if devices are available (applies even without p1meterEvent during restore)
         if operation != ManagerMode.OFF and (len(self.devices) == 0 or all(not d.online for d in self.devices)):
-            _LOGGER.warning("No devices online, not possible to start the operation")
-            persistent_notification.async_create(self.hass, "No devices online, not possible to start the operation", "Zendure", "zendure_ha")
+            startup_race = len(self.devices) > 0 and all(d.lastseen == datetime.min for d in self.devices)
+            if startup_race:
+                # Devices haven't sent MQTT yet — normal at startup, operation will activate on first P1 event
+                _LOGGER.debug("Devices not yet seen (startup), operation %s stored for next P1 event", operation)
+            else:
+                _LOGGER.warning("No devices online, not possible to start the operation")
+                persistent_notification.async_create(self.hass, "No devices online, not possible to start the operation", "Zendure", "zendure_ha")
             return
 
         match self.operation:
@@ -458,9 +441,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         rows = [f"{time_str};{p1};{self.operation.value}"]  # Enums erben von Natur aus einem String
 
         for d in self.devices:
-            tbattery = d.batteryOutput.asInt - d.batteryInput.asInt
-            tsolar = d.solarInput.asInt
-            thome = d.homeOutput.asInt - d.homeInput.asInt
+            tbattery = d.batteryPort.power
+            tsolar = d.solarPort.total_raw_solar if d.solarPort else 0
+            thome = d.acPort.power
             rows.append(f";{tbattery};{tsolar};{thome};{d.electricLevel.asInt}")
         rows.append(f";{self.manualpower.asNumber}")
 

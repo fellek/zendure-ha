@@ -255,26 +255,41 @@ Gerät ist leer und vollständig passiv (kein Strom in irgendeiner Richtung).
 
 ### Wann wird SOCEMPTY geweckt?
 
+Der Wakeup läuft in zwei Pässen innerhalb von `_wake_idle_devices()`:
+
 ```
-Charge-Pfad (distribute_charge → _wake_idle_devices, is_charge=True):
-  Bedingung: Überschuss vorhanden (setpoint < 0 in MATCHING-Modus)
-  Relay-Guard: Wenn offgrid_power > 0 → Gerät überspringen (Relay steuert selbst)
-  Kommando:   power_charge(-50W - max(0, pwr_offgrid))
+Pass 1 (Bypass-Wake):
+  Bedingung: bypass.is_active UND power_flow_state == IDLE
+  Cooldown:  60 s (BYPASS_WAKE_COOLDOWN) zwischen Versuchen pro Gerät
+  Kommando:  pwr = -(POWER_IDLE_OFFSET + bypass_available + offgrid_load)
+             pwr = max(pwr, raw_setpoint)   ← nie mehr als Überschuss
+             power_charge(pwr) → WAKEUP
+
+Pass 2 (Grid-Demand-Wake, nur wenn dev_start < 0):
+  Bedingung: Gerät NICHT in pass1_woken (kein Doppel-Wakeup)
+             UND power_flow_state != WAKEUP
+  Kommando:  pwr = min(dev_start, -POWER_START) - offgrid_load
+             pwr = max(pwr, raw_setpoint)   ← nie mehr als Überschuss
+             power_charge(pwr) → WAKEUP
 ```
 
 SOCEMPTY-Geräte werden **nicht** durch `distribute_discharge` geweckt — weder direkt
-noch indirekt. Die frühere Oszillation (charge-stop-charge) ist damit eliminiert.
+noch indirekt.
 
 ### Reaktionszeit (SOCEMPTY → CHARGE aktiv)
 
 ```
-Zyklus 0:  Überschuss vorhanden → power_charge(-50W) an SOCEMPTY-Gerät gesendet
-Zyklus 1:  (nach ~4 s) homeInput > 0 → Gerät wird als CHARGE klassifiziert
-           Hysterese startet (5 s oder 20 s Cooldown)
-Zyklus 2+: Voller Setpoint nach Cooldown
+Zyklus 0:  Überschuss → power_charge(pwr, gekappt auf Überschuss) gesendet
+           power_flow_state = WAKEUP
+Zyklus 1+: abs(packInputPower - outputPackPower) > 50 W?
+             Nein → WAKEUP bleibt, weiterer Wakeup-Befehl (Pass 2 überspringt WAKEUP)
+             Ja   → wakeup_entered = now(); WAKEUP → CHARGE
+           Post-Wakeup-Ramp startet (0 → 100 % über WAKEUP_RAMP_DURATION = 30 s)
+Zyklus N:  Hysterese startet (5 s oder 20 s Cooldown)
+           Nach Cooldown + Ramp: voller Setpoint
 ```
 
-**Gesamtzeit SOCEMPTY → geladen: ~10–27 s** (je nach Hysterese-Zustand)
+**Gesamtzeit SOCEMPTY → stabiler Ladefluss: ~15–40 s** (Ramp + Hysterese)
 
 ### Stoppsignal bei SOCEMPTY in mgr.charge
 
@@ -295,15 +310,15 @@ Das Gerät behält seinen Ladebefehl. Es wird erst gestoppt wenn der Überschuss
 
 ## Timing-Übersicht
 
-| Übergang                               | Typische Gesamtzeit |
-|----------------------------------------|---------------------|
-| IDLE → DISCHARGE (Cold-start)          | 5–10 s              |
-| IDLE → CHARGE                          | 10–27 s (+ Hysterese)|
-| CHARGE → IDLE (Strom gestoppt)         | 4–8 s               |
-| CHARGE → DISCHARGE                     | 12–20 s             |
-| DISCHARGE Setpoint-Änderung            | 3–6 s               |
-| SOCEMPTY → CHARGE (Überschuss da)      | 10–27 s             |
-| SOCEMPTY Bypass → stabil               | 1 Zyklus (~4 s)     |
+| Übergang                               | Typische Gesamtzeit     |
+|----------------------------------------|-------------------------|
+| IDLE → DISCHARGE (Cold-start)          | 5–10 s                  |
+| IDLE → CHARGE                          | 10–27 s (+ Hysterese)   |
+| CHARGE → IDLE (Strom gestoppt)         | 4–8 s                   |
+| CHARGE → DISCHARGE                     | 12–20 s                 |
+| DISCHARGE Setpoint-Änderung            | 3–6 s                   |
+| SOCEMPTY → CHARGE (Überschuss da)      | 15–40 s (+ Ramp + Hysterese) |
+| SOCEMPTY Bypass → stabil               | 1 Zyklus (~4 s)         |
 
 > **Hinweis:** Die Zyklus-Zeiten hängen davon ab, ob `isFast=True` ausgelöst wird
 > (dann 1,5 s statt 4 s). Abrupte P1-Änderungen (> 3,5 × stddev) lösen Fast-Modus aus.

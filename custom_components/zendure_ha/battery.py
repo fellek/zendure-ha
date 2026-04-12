@@ -17,7 +17,7 @@ class ZendureBattery(EntityDevice):
         match sn[0]:
             case "A": model = "AIO2400" if sn[3] == "3" else "AB1000"; self.kWh = 2.4 if sn[3] == "3" else 0.96
             case "B": model = "AB1000S"; self.kWh = 0.96
-            case "C": model = "I1920" if sn[1:4] == "O4A" else "AB2000" + ("S" if sn[3] == "F" else "X" if sn[3] == "E" else ""); self.kWh = 1.92
+            case "C": model = "AB2000" + ("S" if sn[3] == "F" else "X" if sn[3] == "E" else ""); self.kWh = 1.92
             case "F": model = "AB3000"; self.kWh = 2.88
             case "G": model = "AB3000L"; self.kWh = 2.88
             case "J": model = "I2400"; self.kWh = 2.4

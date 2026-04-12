@@ -30,14 +30,14 @@ class FuseGroup:
             limit = 0
             weight = 0
             for fd in self.devices:
-                if fd.homeInput.asInt > 0:
+                if fd.acPort.is_charging:
                     limit += fd.charge_limit
                     weight += (100 - fd.electricLevel.asInt) * fd.charge_limit
 
             avail = max(self.minpower, limit)
 
             for fd in self.devices:
-                if fd.homeInput.asInt > 0:
+                if fd.acPort.is_charging:
                     if weight < 0: # Sicherheitscheck aus dem Originalcode
                         fd.pwr_max = fd.charge_start
                     else:
@@ -58,14 +58,14 @@ class FuseGroup:
             limit = 0
             weight = 0
             for fd in self.devices:
-                if fd.homeOutput.asInt > 0:
+                if fd.acPort.is_discharging:
                     limit += fd.discharge_limit
                     weight += fd.electricLevel.asInt * fd.discharge_limit
 
             avail = min(self.maxpower, limit)
 
             for fd in self.devices:
-                if fd.homeOutput.asInt > 0:
+                if fd.acPort.is_discharging:
                     if weight > 0:
                         fd.pwr_max = int(avail * (fd.electricLevel.asInt * fd.discharge_limit) / weight)
                     else:

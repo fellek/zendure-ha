@@ -102,6 +102,11 @@ async def mqtt_properties(device: ZendureDevice, payload: Any) -> None:
         device.totalKwh.update_value(device.kWh)
         device.availableKwh.update_value((device.electricLevel.asNumber - device.minSoc.asNumber) / 100 * device.kWh)
 
+    # Re-evaluate power flow state after every report so WAKEUP→CHARGE/DISCHARGE
+    # transitions are picked up without waiting for the next classify cycle.
+    # Must run after the entityUpdate loop above so batteryPort.power is fresh.
+    device.update_power_flow_state()
+
 
 def mqtt_message(device: ZendureDevice, topic: str, payload: Any) -> bool:
     """Route incoming MQTT topic to the appropriate handler."""
@@ -150,11 +155,11 @@ def entity_update_side_effects(device: ZendureDevice, key: Any, value: Any) -> N
                 if not device.heatState.is_on:
                     device.aggrCharge.aggregate(dt_util.now(), value)
                 device.aggrDischarge.aggregate(dt_util.now(), 0)
-                device.batInOut.update_value(device.batteryOutput.asInt - device.batteryInput.asInt)
+                device.batInOut.update_value(device.batteryPort.power)
             case "packInputPower":
                 device.aggrCharge.aggregate(dt_util.now(), 0)
                 device.aggrDischarge.aggregate(dt_util.now(), value)
-                device.batInOut.update_value(device.batteryOutput.asInt - device.batteryInput.asInt)
+                device.batInOut.update_value(device.batteryPort.power)
             case "solarInputPower":
                 device.aggrSolar.aggregate(dt_util.now(), value)
             case "gridInputPower":
