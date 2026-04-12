@@ -27,7 +27,6 @@ from . import ble as ble_transport
 from . import mqtt_protocol
 from .battery import ZendureBattery
 from .power_port import PowerPort, AcPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort
-from .fusegroup import FuseGroup
 
 if TYPE_CHECKING:
     from .api import ZendureApi
@@ -43,6 +42,7 @@ class ZendureDevice(EntityDevice):
 
     def __init__(self, hass: HomeAssistant, deviceId: str, name: str, model: str, definition: dict[str, str], parent: str | None = None) -> None:
         """Initialize Device."""
+        from .fusegroup import FuseGroup
         self.fuseGrp = None
 
         """Initialize Device."""
