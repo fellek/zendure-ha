@@ -47,7 +47,7 @@ class PowerPort(ABC):
         pass
 
 
-class GridPowerPort(PowerPort):
+class GridSmartmeter(PowerPort):
     """Representiert den P1 Zähler (AC Strom vom Netz)."""
     
     def __init__(self):
@@ -114,14 +114,14 @@ Jetzt müssen wir den Manager von den hartkodierten Sensor-Namen entkoppeln und 
 #### A) Import hinzufügen
 Ganz oben in `manager.py`:
 ```python
-from .power_port import DcSolarPowerPort, GridPowerPort, OffGridPowerPort
+from .power_port import DcSolarPowerPort, GridSmartmeter, OffGridPowerPort
 ```
 
 #### B) Initialisierung in `__init__` und `loadDevices`
 In der `__init__` Methode des `ZendureManager` fügst du den Grid-Port hinzu:
 ```python
 # Statt nur self.p1_factor = 1
-self.grid_port = GridPowerPort()
+self.grid_port = GridSmartmeter()
 self.p1_factor = 1
 ```
 
@@ -252,6 +252,6 @@ In der Methode `_p1_changed` aktualisierst du nun den Port statt nur einer Varia
 ### Warum ist diese Struktur jetzt viel besser?
 
 1. **Erweiterbarkeit:** Wenn Zendure nächstes Jahr ein Gerät mit einem *zweiten*, unabhängigen AC-Ausgang (z.B. für eine Wärmepumpe) herausbringt, musst du nur eine neue Klasse `SecondaryAcPort(PowerPort)` erstellen und in `loadDevices` appenden. Die Mathematik in `manager.py` bleibt komplett unberührt.
-2. **Testbarkeit:** Du kannst jetzt in Unit-Tests Mock-Ports erstellen: `port = GridPowerPort(); port.update_state(-500)`. Du musst nicht mehr ein ganzes `ZendureDevice` mit 20 Sensoren mocken, nur um den Manager zu testen.
+2. **Testbarkeit:** Du kannst jetzt in Unit-Tests Mock-Ports erstellen: `port = GridSmartmeter(); port.update_state(-500)`. Du musst nicht mehr ein ganzes `ZendureDevice` mit 20 Sensoren mocken, nur um den Manager zu testen.
 3. **Saubereres Interface:** Das `manager.py` weiß nicht mehr, *wie* ein Gerät seinen Offgrid-Strom misst (ob über `pwr_offgrid` oder einen anderen Sensor). Es fragt den Port einfach: `"Wie viel verbrauchst du gerade?"` und bekommt eine saubere Integer zurück.
 4. **DC-Solar-Isolierung:** Durch `is_input_only = True` im `DcSolarPowerPort` ist im Code sofort ersichtlich, dass dieser Anschlusspunkt den Setpoint nicht beeinflusst, sondern reine "Info" für den SOCFULL-Bypass ist.

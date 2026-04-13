@@ -29,8 +29,7 @@ class PowerPort(ABC):
         pass
 
 
-# @ todo rename to GridSmartMeter()
-class GridPowerPort(PowerPort):
+class GridSmartmeter(PowerPort):
     """Representiert den P1 Zähler (AC Strom vom Netz)."""
 
     def __init__(self):
@@ -47,8 +46,8 @@ class GridPowerPort(PowerPort):
         return self._power
 
 
-class AcPowerPort(PowerPort):
-    """Representiert die AC-Netzverbindung eines Geräts (gridInputPower / outputHomePower)."""
+class ConnectorPowerPort(PowerPort):
+    """Repräsentiert die AC-Netzverbindung eines Geräts (gridInputPower / outputHomePower)."""
 
     def __init__(self, device: ZendureDevice):
         super().__init__(name=f"AC Grid ({device.name})", is_input_only=False)

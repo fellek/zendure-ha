@@ -265,7 +265,7 @@
 | Typ | Name | Vorschlag | Grund |
 |-----|------|-----------|-------|
 | Class | `PowerPort` | ok | -- |
-| Class | `GridPowerPort` | ok | -- |
+| Class | `GridSmartmeter` | ok | -- |
 | Class | `OffGridPowerPort` | ok | -- |
 | Class | `DcSolarPowerPort` | ok | -- |
 | Property | `total_raw_solar` | `total_solar_power` | Konsistenter mit `power` Property |
