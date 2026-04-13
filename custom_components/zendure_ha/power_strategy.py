@@ -317,6 +317,7 @@ async def classify_and_dispatch(mgr: ZendureManager, p1: int, isFast: bool, time
     await _dispatch_to_mode(mgr, p1, setpoint, isFast, time)
 
 
+# @todo verwendet _p1 nicht?
 async def _assess(mgr: ZendureManager, _p1: int, time: datetime) -> SystemSnapshot:
     """Assess phase: self-heal WAKE_TIMEOUT, classify devices, build a snapshot.
 
@@ -369,6 +370,7 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice) -> tuple[int,
             return 0, 0
 
         case PowerFlowState.CHARGE:
+            # @todo should it be d.batteryPort.power?
             home = -d.connectorPort.grid_consumption + offgrid_load
             mgr.charge.append(d)
             _LOGGER.debug("Classify %s => CHARGE: gridConsumption=%s offgrid=%s home=%s soc=%s",
@@ -380,6 +382,7 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice) -> tuple[int,
             mgr.discharge.append(d)
             mgr.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
             mgr.discharge_produced -= d.pwr_produced
+            # @todo should it be d.batteryPort.power?
             net_battery = home - offgrid_load
             _LOGGER.debug("Classify %s => DISCHARGE: feedIn=%s offgrid=%s soc=%s",
                           d.name, home, offgrid_load, d.electricLevel.asInt)
