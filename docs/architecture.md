@@ -97,7 +97,7 @@ custom_components/zendure_ha/
 │
 ├── Power Management
 ├── power_strategy.py              # Smart Mode, power distribution algorithm
-├── power_port.py                  # GridPowerPort, OffGridPowerPort, DcSolarPowerPort
+├── power_port.py                  # GridSmartmeter, OffGridPowerPort, DcSolarPowerPort
 ├── fusegroup.py                   # Fuse Group (circuit breaker) management
 │
 ├── Supporting
