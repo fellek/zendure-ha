@@ -46,7 +46,7 @@ class GridSmartmeter(PowerPort):
         return self._power
 
 
-class AcPowerPort(PowerPort):
+class ConnectorPowerPort(PowerPort):
     """Repräsentiert die AC-Netzverbindung eines Geräts (gridInputPower / outputHomePower)."""
 
     def __init__(self, device: ZendureDevice):

@@ -66,7 +66,7 @@ class FakeSensor:
 
 @dataclass
 class FakePort:
-    """Stand-in for AcPowerPort / BatteryPowerPort / OffGridPowerPort / DcSolarPowerPort."""
+    """Stand-in for ConnectorPowerPort / BatteryPowerPort / OffGridPowerPort / DcSolarPowerPort."""
 
     power: int = 0
     available: int = 0

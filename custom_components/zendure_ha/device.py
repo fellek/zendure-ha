@@ -26,7 +26,7 @@ from .sensor import ZendureRestoreSensor, ZendureSensor
 from . import ble as ble_transport
 from . import mqtt_protocol
 from .battery import ZendureBattery
-from .power_port import PowerPort, AcPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort
+from .power_port import PowerPort, ConnectorPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort
 
 if TYPE_CHECKING:
     from .api import ZendureApi
@@ -139,7 +139,7 @@ class ZendureDevice(EntityDevice):
 
         # @todo rename to ConnectorPowerPort, damit ist dann sowohl der DC Ausgang, als auch der AC Ausgang gemeint. Ein DC Ausgang ist vermutlich nur in Entladerichtung nutzbar, dies muss verifiziert werden.
         # 0. AC Grid Port: Jedes Gerät hat eine AC-Netzverbindung
-        self.acPort = AcPowerPort(self)
+        self.acPort = ConnectorPowerPort(self)
         self.ports.append(self.acPort)
 
         # 1. Battery Port: Jedes Gerät hat Batterien
