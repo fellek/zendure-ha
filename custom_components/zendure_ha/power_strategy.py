@@ -369,14 +369,14 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice) -> tuple[int,
             return 0, 0
 
         case PowerFlowState.CHARGE:
-            home = -d.acPort.grid_consumption + offgrid_load
+            home = -d.connectorPort.grid_consumption + offgrid_load
             mgr.charge.append(d)
             _LOGGER.debug("Classify %s => CHARGE: gridConsumption=%s offgrid=%s home=%s soc=%s",
-                          d.name, d.acPort.grid_consumption, offgrid_load, home, d.electricLevel.asInt)
-            return home, -d.acPort.grid_consumption
+                          d.name, d.connectorPort.grid_consumption, offgrid_load, home, d.electricLevel.asInt)
+            return home, -d.connectorPort.grid_consumption
 
         case PowerFlowState.DISCHARGE:
-            home = d.acPort.feed_in
+            home = d.connectorPort.feed_in
             mgr.discharge.append(d)
             mgr.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
             mgr.discharge_produced -= d.pwr_produced
@@ -390,7 +390,7 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice) -> tuple[int,
             mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
             mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
             _LOGGER.debug("Classify %s => %s: gridConsumption=%s offgrid=%s soc=%s",
-                          d.name, d.power_flow_state.name, d.acPort.grid_consumption, offgrid_load, d.electricLevel.asInt)
+                          d.name, d.power_flow_state.name, d.connectorPort.grid_consumption, offgrid_load, d.electricLevel.asInt)
             return 0, 0
 
 
@@ -702,7 +702,7 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
             # If device is SOCEMPTY, all power from offgrid_load is already consumed from grid
             offgrid_load = d.offgridPort.consumption   if d.offgridPort else 0
             bypass_load = solar + offgrid_in - offgrid_load
-            device_power = d.acPort.power if d.acPort else 0
+            device_power = d.connectorPort.power if d.connectorPort else 0
 
             if d.state == DeviceState.SOCEMPTY:
                 pwr = -(SmartMode.POWER_IDLE_OFFSET + device_power)

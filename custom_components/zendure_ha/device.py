@@ -139,8 +139,8 @@ class ZendureDevice(EntityDevice):
 
         # @todo rename to ConnectorPowerPort, damit ist dann sowohl der DC Ausgang, als auch der AC Ausgang gemeint. Ein DC Ausgang ist vermutlich nur in Entladerichtung nutzbar, dies muss verifiziert werden.
         # 0. AC Grid Port: Jedes Gerät hat eine AC-Netzverbindung
-        self.acPort = ConnectorPowerPort(self)
-        self.ports.append(self.acPort)
+        self.connectorPort = ConnectorPowerPort(self)
+        self.ports.append(self.connectorPort)
 
         # 1. Battery Port: Jedes Gerät hat Batterien
         self.batteryPort = BatteryPowerPort(self)
@@ -291,10 +291,10 @@ class ZendureDevice(EntityDevice):
         power = min(0, max(power, self.charge_limit))
         if power == 0 and self.state == DeviceState.SOCEMPTY and self.bypass.is_active:
             _LOGGER.debug("Power charge %s => no action [SOCEMPTY bypass hold]", self.name)
-            return self.acPort.grid_consumption
-        if abs(power + self.acPort.power) <= SmartMode.POWER_TOLERANCE:
+            return self.connectorPort.grid_consumption
+        if abs(power + self.connectorPort.power) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
-            return self.acPort.grid_consumption
+            return self.connectorPort.grid_consumption
         return await self.charge(power)
 
     async def discharge(self, _power: int) -> int:
@@ -304,9 +304,9 @@ class ZendureDevice(EntityDevice):
     async def power_discharge(self, power: int) -> int:
         """Set discharge power."""
         power = max(0, min(power, self.discharge_limit))
-        if abs(power - self.acPort.power) <= SmartMode.POWER_TOLERANCE:
+        if abs(power - self.connectorPort.power) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)
-            return self.acPort.feed_in
+            return self.connectorPort.feed_in
         return await self.discharge(power)
 
     async def power_off(self) -> None:
@@ -366,8 +366,8 @@ class ZendureDevice(EntityDevice):
         solar = self.solarPort.total_raw_solar if self.solarPort else 0
         offgrid_feed = self.offgridPort.feed_in if self.offgridPort else 0
         return min(0,
-                   self.batteryPort.discharge_power + self.acPort.grid_consumption
-                   - self.batteryPort.charge_power - self.acPort.feed_in - solar - offgrid_feed)
+                   self.batteryPort.discharge_power + self.connectorPort.grid_consumption
+                   - self.batteryPort.charge_power - self.connectorPort.feed_in - solar - offgrid_feed)
 
 
 class ZendureLegacy(ZendureDevice):

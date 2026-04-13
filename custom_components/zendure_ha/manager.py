@@ -443,7 +443,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         for d in self.devices:
             tbattery = d.batteryPort.power
             tsolar = d.solarPort.total_raw_solar if d.solarPort else 0
-            thome = d.acPort.power
+            thome = d.connectorPort.power
             rows.append(f";{tbattery};{tsolar};{thome};{d.electricLevel.asInt}")
         rows.append(f";{self.manualpower.asNumber}")
 
