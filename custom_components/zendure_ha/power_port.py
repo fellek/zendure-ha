@@ -29,7 +29,6 @@ class PowerPort(ABC):
         pass
 
 
-# @ todo rename to GridSmartMeter()
 class GridSmartmeter(PowerPort):
     """Representiert den P1 Zähler (AC Strom vom Netz)."""
 
