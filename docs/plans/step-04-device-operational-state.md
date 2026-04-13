@@ -33,28 +33,29 @@ def update_operational_state(self) -> None:
         return
 
     if self.state == DeviceState.SOCEMPTY:
-        if not self.acPort.is_charging and not self.acPort.is_discharging \
-           and self.batteryPort.charge_power == 0:
-            self.op_state = (ManagerState.BYPASS
-                             if (self.offgridPort and self.offgridPort.consumption > 0)
-                             else ManagerState.SOCEMPTY)
-        elif self.acPort.is_charging:
-            self.op_state = ManagerState.CHARGE  # Gerät lädt trotz SOCEMPTY (woken)
-        else:
-            self.op_state = ManagerState.SOCEMPTY
-        self.opStateSensor.update_value(self.op_state.value)
-        return
-
-    offgrid_load = self.offgridPort.consumption if self.offgridPort else 0
-
-    if self.acPort.grid_consumption > offgrid_load:
-        self.op_state = ManagerState.CHARGE
-    elif self.acPort.feed_in > 0 or offgrid_load > 0:
-        self.op_state = ManagerState.DISCHARGE
+        if not self.acPort.is_consuming and not self.acPort.is_producing
+            and self.batteryPort.charge_power == 0:
+        self.op_state = (ManagerState.BYPASS
+                         if (self.offgridPort and self.offgridPort.power_consumption > 0)
+                         else ManagerState.SOCEMPTY)
+        elif self.acPort.is_consuming:
+        self.op_state = ManagerState.CHARGE  # Gerät lädt trotz SOCEMPTY (woken)
     else:
-        self.op_state = ManagerState.IDLE
-
+        self.op_state = ManagerState.SOCEMPTY
     self.opStateSensor.update_value(self.op_state.value)
+    return
+
+
+offgrid_load = self.offgridPort.power_consumption if self.offgridPort else 0
+
+if self.acPort.power_consumption > offgrid_load:
+    self.op_state = ManagerState.CHARGE
+elif self.acPort.power_production > 0 or offgrid_load > 0:
+    self.op_state = ManagerState.DISCHARGE
+else:
+    self.op_state = ManagerState.IDLE
+
+self.opStateSensor.update_value(self.op_state.value)
 ```
 
 ### Aufruf am Ende von `power_get()`:

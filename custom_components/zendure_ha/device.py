@@ -263,7 +263,7 @@ class ZendureDevice(EntityDevice):
         """Set the MQTT server for the device via BLE."""
         return await ble_transport.ble_mqtt(self, mqtt)
 
-    async def power_get(self) -> bool:
+    async def update_state(self) -> bool:
         if self.lastseen < datetime.now():
             self.lastseen = datetime.min
             self.setStatus()
@@ -291,10 +291,10 @@ class ZendureDevice(EntityDevice):
         power = min(0, max(power, self.charge_limit))
         if power == 0 and self.state == DeviceState.SOCEMPTY and self.bypass.is_active:
             _LOGGER.debug("Power charge %s => no action [SOCEMPTY bypass hold]", self.name)
-            return self.connectorPort.grid_consumption
+            return self.connectorPort.power_consumption
         if abs(power + self.connectorPort.power) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
-            return self.connectorPort.grid_consumption
+            return self.connectorPort.power_consumption
         return await self.charge(power)
 
     async def discharge(self, _power: int) -> int:
@@ -306,7 +306,7 @@ class ZendureDevice(EntityDevice):
         power = max(0, min(power, self.discharge_limit))
         if abs(power - self.connectorPort.power) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)
-            return self.connectorPort.feed_in
+            return self.connectorPort.power_production
         return await self.discharge(power)
 
     async def power_off(self) -> None:
@@ -363,11 +363,11 @@ class ZendureDevice(EntityDevice):
     @property
     def pwr_produced(self) -> int:
         """Power produced internally (negative = generation). Computed from ports."""
-        solar = self.solarPort.total_raw_solar if self.solarPort else 0
-        offgrid_feed = self.offgridPort.feed_in if self.offgridPort else 0
+        solar = self.solarPort.total_solar_power if self.solarPort else 0
+        offgrid_feed = self.offgridPort.power_production if self.offgridPort else 0
         return min(0,
-                   self.batteryPort.discharge_power + self.connectorPort.grid_consumption
-                   - self.batteryPort.charge_power - self.connectorPort.feed_in - solar - offgrid_feed)
+                   self.batteryPort.discharge_power + self.connectorPort.power_consumption
+                   - self.batteryPort.charge_power - self.connectorPort.power_production - solar - offgrid_feed)
 
 
 class ZendureLegacy(ZendureDevice):

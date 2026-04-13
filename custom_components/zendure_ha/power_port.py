@@ -59,22 +59,22 @@ class ConnectorPowerPort(PowerPort):
         return self.device.homeOutput.asInt - self.device.homeInput.asInt
 
     @property
-    def grid_consumption(self) -> int:
+    def power_consumption(self) -> int:
         """Power drawn from grid (gridInputPower), always >= 0."""
         return self.device.homeInput.asInt
 
     @property
-    def feed_in(self) -> int:
+    def power_production(self) -> int:
         """Power fed into home (outputHomePower), always >= 0."""
         return self.device.homeOutput.asInt
 
     @property
-    def is_charging(self) -> bool:
+    def is_consuming(self) -> bool:
         """Device is currently drawing from grid."""
         return self.device.homeInput.asInt > 0
 
     @property
-    def is_discharging(self) -> bool:
+    def is_producing(self) -> bool:
         """Device is currently feeding into home."""
         return self.device.homeOutput.asInt > 0
 
@@ -125,12 +125,12 @@ class OffGridPowerPort(PowerPort):
         return self.device.pwr_offgrid
 
     @property
-    def consumption(self) -> int:
+    def power_consumption(self) -> int:
         """Reine Last an Offgrid-Steckdose (>= 0)."""
         return max(0, self.device.pwr_offgrid)
 
     @property
-    def feed_in(self) -> int:
+    def power_production(self) -> int:
         """Einspeisung über Offgrid (>= 0). Externer Akku oder Mikrowechselrichter."""
         return max(0, -self.device.pwr_offgrid)
 
@@ -146,9 +146,9 @@ class DcSolarPowerPort(PowerPort):
     @property
     def power(self) -> int:
 
-        return self.total_raw_solar
+        return self.total_solar_power
 
     @property
-    def total_raw_solar(self) -> int:
+    def total_solar_power(self) -> int:
         """Summiert alle zugewiesenen DC-Eingänge auf."""
         return sum(sensor.asInt for sensor in self._sensors)

@@ -154,7 +154,7 @@ Hier wird der Code durch die Ports endlich lesbar. Ersetze die relevante Schleif
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
 
 
-    """Return the distribution setpoint."""
+"""Return the distribution setpoint."""
 availableKwh = 0
 # 1. Basis-Setpoint ist immer der aktuelle Netz-Bezug/-Export
 setpoint = self.grid_port.power
@@ -166,7 +166,7 @@ for d in self.devices:
     offgrid_port = next((p for p in ports if isinstance(p, OffGridPowerPort)), None)
     solar_port = next((p for p in ports if isinstance(p, DcSolarPowerPort)), None)
 
-    if await d.power_get():
+    if await d.update_state():
         # 3. Entkoppelte Berechnung der unkontrollierten Einflüsse
         offgrid_power = offgrid_port.power if offgrid_port else 0
         solar_power = solar_port.raw_solar_input if solar_port else 0

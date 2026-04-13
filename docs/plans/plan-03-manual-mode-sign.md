@@ -1,6 +1,6 @@
 # Plan 03: MANUAL-Modus Vorzeichen-Problem (Bug #7)
 
-## Status: Offen
+## Status: Geschlossen - ist kein Fehler
 
 ## Problem
 

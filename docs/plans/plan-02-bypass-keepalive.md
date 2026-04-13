@@ -39,8 +39,8 @@ mindestens einen vollen Relay-Umschaltzyklus (2-3 Minuten).
 ### Option A — Charge-Keepalive (inputLimit >= 10W während BYPASS-INPUT)
 
 ```python
-if d.is_bypassing and d.acPort.grid_consumption == 0:
-    await d.charge(-10)   # Minimaler Keepalive: inputLimit=10W
+if d.is_bypassing and d.acPort.power_consumption == 0:
+   await d.charge(-10)  # Minimaler Keepalive: inputLimit=10W
 ```
 
 Vorteil: Gerät bleibt reaktionsfähig. Nachteil: 10W Netzbezug zusätzlich.
@@ -48,8 +48,8 @@ Vorteil: Gerät bleibt reaktionsfähig. Nachteil: 10W Netzbezug zusätzlich.
 ### Option B — Discharge-Keepalive (outputLimit = 10W)
 
 ```python
-if d.is_bypassing and d.acPort.feed_in == 0:
-    await d.discharge(10)  # outputLimit=10W
+if d.is_bypassing and d.acPort.power_production == 0:
+   await d.discharge(10)  # outputLimit=10W
 ```
 
 ### Option C — Puls statt Dauerstrom

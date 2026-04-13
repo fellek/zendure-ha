@@ -71,7 +71,7 @@ Deine Konstanten sind fertig optimiert. Was du jetzt im Code beheben musst, ist 
 **Die aktuelle Logik:**
 ```python
 home = -d.homeInput.asInt + offgrid_power
-if home < 0:
+if connector_power < 0:
     mgr.charge.append(d) # Falsch, wenn homeInput nur Standby/Passthrough ist!
 ```
 

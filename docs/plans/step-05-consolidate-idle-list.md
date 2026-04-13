@@ -33,7 +33,7 @@ async def _wake_idle_devices(mgr, dev_start, is_charge):
 
     if is_charge:
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt, reverse=True):
-            offgrid_load = d.offgridPort.consumption if d.offgridPort else 0
+            offgrid_load = d.offgridPort.power_consumption if d.offgridPort else 0
             match d.op_state:
                 case ManagerState.BYPASS | ManagerState.SOCEMPTY:
                     await d.power_charge(-SmartMode.POWER_START - offgrid_load)
