@@ -364,7 +364,7 @@ async def _assess(mgr: ZendureManager, _p1: int, time: datetime) -> SystemSnapsh
 async def _classify_devices(mgr: ZendureManager) -> tuple[int, float, int]:
     """Classify each device and return (setpoint, available_kwh, power)."""
     available_kwh: float = 0
-    setpoint = mgr.grid_port.power
+    setpoint = mgr.grid_smartmeter.power
     power = 0
 
     for d in mgr.devices:
@@ -490,6 +490,22 @@ async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) 
         else:
             _LOGGER.debug("Charge: stop discharge %s [SOCFULL, offgrid=%s]", d.name, d.offgrid_power)
             await apply_assignment(d, DeviceAssignment(Command.STOP_DISCHARGE))
+    # @todo review this condition, becaus its different to distribute_charge()
+    # Cold-start wakeup: kein aktives Charge-Gerät, aber Überschuss vorhanden.
+    # Analog zum Discharge-Pfad: echten Setpoint-Anteil senden, damit
+    # batteryInput über die is_charging-Schwelle kommt und der IDLE-Loop
+    # durchbrochen wird.
+    if not active_devices and mgr.idle and setpoint < -SmartMode.POWER_IDLE_OFFSET:
+        for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt):
+            if d.state == DeviceState.SOCFULL:
+                continue
+            wake_power = max(setpoint, d.charge_limit)  # beides negativ; charge_limit ist untere Schranke
+            _LOGGER.debug("Charge: cold-start wake %s => power_charge(%s)", d.name, wake_power)
+            await d.power_charge(wake_power)
+            if d.power_flow_state == PowerFlowState.IDLE:
+                d.power_flow_state = PowerFlowState.WAKEUP
+                d.wakeup_entered = time
+            break  # ein Gerät pro Zyklus aufwecken
 
     await _distribute_power(mgr, active_devices, setpoint, CHARGE_DIR, time)
 
@@ -508,7 +524,9 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int, time: datetim
             continue
         await apply_assignment(d, DeviceAssignment(Command.STOP_CHARGE))
 
-    # Cold-start wakeup: kein aktives Discharge-Gerät, aber Bedarf vorhanden
+    # Cold-start wakeup: kein aktives Discharge-Gerät, aber Bedarf vorhanden.
+    # Echten Setpoint-Anteil senden (nicht nur 10W Keepalive), sonst bleibt
+    # batteryOutput auf der is_discharging-Schwelle stehen und IDLE-Loop zementiert.
     if not mgr.discharge and mgr.idle and setpoint > SmartMode.POWER_IDLE_OFFSET:
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt, reverse=True):
             if d.state == DeviceState.SOCEMPTY:
@@ -517,8 +535,16 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int, time: datetim
             if d.electricLevel.asInt <= min_soc_limit:
                 _LOGGER.debug("Discharge Wakeup blocked: %s SoC=%s%% at minSoc limit", d.name, d.electricLevel.asInt)
                 continue
-            _LOGGER.debug("Discharge: wake idle %s => power_discharge(%s)", d.name, SmartMode.POWER_IDLE_OFFSET)
-            await d.power_discharge(SmartMode.POWER_IDLE_OFFSET)
+            # @todo review this condition, becaus its different to distribute_charge()
+            wake_power = min(setpoint, d.discharge_limit)
+            _LOGGER.debug("Discharge: cold-start wake %s => power_discharge(%s)", d.name, wake_power)
+            await d.power_discharge(wake_power)
+            # Zustand auf WAKEUP heben, damit _recover_wake_timeouts bei
+            # fehlender Hardware-Antwort self-healed und der nächste Zyklus
+            # nicht erneut als kompletter Cold-Start behandelt wird.
+            if d.power_flow_state == PowerFlowState.IDLE:
+                d.power_flow_state = PowerFlowState.WAKEUP
+                d.wakeup_entered = time
             break  # ein Gerät pro Zyklus aufwecken
 
     # Determine if we only need to pass through solar power
