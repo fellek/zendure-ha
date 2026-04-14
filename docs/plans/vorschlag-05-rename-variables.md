@@ -8,9 +8,9 @@ Gesammelt aus @todo-Kommentaren im Code:
 
 ### power_strategy.py
 
-| Aktuell | Vorschlag | Stelle | Begründung |
-|---------|-----------|--------|------------|
-| `home` | `pwr_consumed` | Zeile ~361 | `home` ist unklar — es ist die vom Gerät gelieferte/verbrauchte Leistung, nicht das "Zuhause" |
+| Aktuell | Vorschlag       | Stelle | Begründung |
+|---------|-----------------|--------|------------|
+| `home` | `connectorPort` | Zeile ~361 | `home` ist unklar — es ist die vom Gerät gelieferte/verbrauchte Leistung, nicht das "Zuhause" |
 
 ### device.py
 
@@ -18,6 +18,8 @@ Gesammelt aus @todo-Kommentaren im Code:
 |---------|-----------|--------|------------|
 | `kWh` | `capacity` | Zeile ~67 | `kWh` ist eine Einheit, kein Variablenname. Meint die Gesamtkapazität |
 | `actualKwh` | `actual_capacity` | Zeile ~82 | Analog zu `kWh` |
+| `availableKwh` | `remaining_energy` | — | Einheit im Namen; beschreibt die noch verfügbare Energie in kWh bis `SOCEMPTY` |
+| `totalKwh` | `total_capacity` | — | Einheit im Namen; bezeichnet die Gesamtkapazität der Akku-Pakete eines Gerätes/Device |
 | `AcPowerPort` (acPort) | `ConnectorPowerPort` | Zeile ~140 | Gemeint ist sowohl DC- als auch AC-Ausgang. Ein DC-Ausgang ist vermutlich nur in Entladerichtung nutzbar (muss verifiziert werden) |
 
 ### power_port.py

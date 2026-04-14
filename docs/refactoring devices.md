@@ -119,9 +119,10 @@ from .power_port import DcSolarPowerPort, GridSmartmeter, OffGridPowerPort
 
 #### B) Initialisierung in `__init__` und `loadDevices`
 In der `__init__` Methode des `ZendureManager` fügst du den Grid-Port hinzu:
+
 ```python
 # Statt nur self.p1_factor = 1
-self.grid_port = GridSmartmeter()
+self.grid_smartmeter = GridSmartmeter()
 self.p1_factor = 1
 ```
 
@@ -157,7 +158,7 @@ Hier wird der Code durch die Ports endlich lesbar. Ersetze die relevante Schleif
 """Return the distribution setpoint."""
 availableKwh = 0
 # 1. Basis-Setpoint ist immer der aktuelle Netz-Bezug/-Export
-setpoint = self.grid_port.power
+setpoint = self.grid_smartmeter.power
 power = 0
 
 for d in self.devices:
@@ -231,20 +232,20 @@ In der Methode `_p1_changed` aktualisierst du nun den Port statt nur einer Varia
 
 ```python
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
-        if not self.hass.is_running or (new_state := event.data["new_state"]) is None:
-            return
+    if not self.hass.is_running or (new_state := event.data["new_state"]) is None:
+        return
 
-        try:
-            p1 = int(self.p1_factor * float(new_state.state))
-        except ValueError:
-            return
+    try:
+        p1 = int(self.p1_factor * float(new_state.state))
+    except ValueError:
+        return
 
-        # --- NEU: Zustand an den Port delegieren ---
-        self.grid_port.update_state(p1)
-        # -------------------------------------------
+    # --- NEU: Zustand an den Port delegieren ---
+    self.grid_smartmeter.update_state(p1)
+    # -------------------------------------------
 
-        time = datetime.now()
-        # ... [Rest bleibt gleich] ...
+    time = datetime.now()
+    # ... [Rest bleibt gleich] ...
 ```
 
 ---

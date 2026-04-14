@@ -1,5 +1,23 @@
 # Vorschlag 02: Stop-Kommando nur wenn Gerät nicht IDLE
 
+## Status: Umgesetzt (2026-04-14)
+
+Umsetzung in `power_strategy.py:150-152` (Early-Return in `apply_assignment`):
+
+```python
+# Skip redundant stop commands when device is already idle (Vorschlag 02).
+if d.power_flow_state == PowerFlowState.IDLE:
+    return 0
+```
+
+Greift für `STOP_CHARGE` und `STOP_DISCHARGE`. Der SF 2400-Quirk-Guard in
+`device.py` bleibt als zweite Sicherungslinie aktiv.
+
+Regression-Tests: `tests/test_power_strategy_regressions.py`
+(`test_stop_charge_on_idle_device_is_noop`,
+`test_stop_discharge_on_idle_device_is_noop`,
+`test_stop_charge_on_charging_device_still_fires`).
+
 ## Priorität: Mittel
 
 ## Problem

@@ -26,6 +26,7 @@ from .sensor import ZendureRestoreSensor, ZendureSensor
 from . import ble as ble_transport
 from . import mqtt_protocol
 from .battery import ZendureBattery
+from .device_components import DevicePortBundle, DevicePowerFlowStateMachine, MqttProtocolHandler
 from .power_port import PowerPort, ConnectorPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort, InverterLossPowerPort
 
 if TYPE_CHECKING:
@@ -88,7 +89,13 @@ class ZendureDevice(EntityDevice):
 
         self.create_entities()
         self.bypass = BypassRelay(self)
-        self.ports: list[PowerPort] = []      # Wird von jeder Subklasse befüllt
+
+        # Collaborators (see docs/plans/vorschlag-06). Port bundle is initialised
+        # by the subclass after device-specific flags (pv_port_count, maxSolar,
+        # _has_offgrid) have been set — via `_init_power_ports()`.
+        self.port_bundle = DevicePortBundle(self)
+        self.state_machine = DevicePowerFlowStateMachine(self)
+        self.mqtt_handler = MqttProtocolHandler(self)
 
     @property
     def is_bypassing(self) -> bool:
@@ -132,40 +139,34 @@ class ZendureDevice(EntityDevice):
         self.power_flow_sensor = ZendureSensor(self, "power_flow_state")
         self.inverterLoss = ZendureSensor(self, "inverter_loss", None, "W", "power", "measurement")
 
-    # NEU: Zentrale Initialisierung der Power Ports
     def _init_power_ports(self) -> None:
-        """Initialisiert Ports NUR, wenn das Gerät diese auch physisch hat."""
-        self.solarPort: DcSolarPowerPort | None = None
-        self.offgridPort: OffGridPowerPort | None = None
+        """Delegiert an den `DevicePortBundle`-Kollaborator."""
+        self.port_bundle.init()
 
-        # @todo rename to ConnectorPowerPort, damit ist dann sowohl der DC Ausgang, als auch der AC Ausgang gemeint. Ein DC Ausgang ist vermutlich nur in Entladerichtung nutzbar, dies muss verifiziert werden.
-        # 0. AC Grid Port: Jedes Gerät hat eine AC-Netzverbindung
-        self.connectorPort = ConnectorPowerPort(self)
-        self.ports.append(self.connectorPort)
+    # --- Port facade: delegate to port_bundle for backwards compatibility ---
+    @property
+    def connectorPort(self) -> ConnectorPowerPort:
+        return self.port_bundle.connector  # type: ignore[return-value]
 
-        # 1. Battery Port: Jedes Gerät hat Batterien
-        self.batteryPort = BatteryPowerPort(self)
-        self.ports.append(self.batteryPort)
+    @property
+    def batteryPort(self) -> BatteryPowerPort:
+        return self.port_bundle.battery  # type: ignore[return-value]
 
-        # 2. DC Solar Port: Wird IGNORIERT, wenn pv_port_count == 0
-        if self.pv_port_count > 0 and self.maxSolar != 0:
-            solar_sensors = [self.solarInput] # Der Haupt-Sensor aus create_entities()
-            for i in range(2, self.pv_port_count + 1):
-                extra_sensor = ZendureSensor(self, f"solarInputPower_{i}", None, "W", "power", "measurement", icon="mdi:solar-panel")
-                solar_sensors.append(extra_sensor)
-            self.solarPort = DcSolarPowerPort(self, solar_sensors)
-            self.ports.append(self.solarPort)
+    @property
+    def solarPort(self) -> DcSolarPowerPort | None:
+        return self.port_bundle.solar
 
-        # 2. Offgrid Port: Wird IGNORIERT, wenn _has_offgrid == False
-        if self._has_offgrid:
-            self.offGrid = ZendureSensor(self, "gridOffPower", None, "W", "power", "measurement")
-            self.aggrOffGrid = ZendureRestoreSensor(self, "aggrGridOffPower", None, "kWh", "energy", "total_increasing", 2)
-            self.offgridPort = OffGridPowerPort(self)
-            self.ports.append(self.offgridPort)
+    @property
+    def offgridPort(self) -> OffGridPowerPort | None:
+        return self.port_bundle.offgrid
 
-        # 3. Inverter Loss Port: Schätzung des Selbstverbrauchs (jedes Gerät hat Verluste)
-        self.inverterLossPort = InverterLossPowerPort(self)
-        self.ports.append(self.inverterLossPort)
+    @property
+    def inverterLossPort(self) -> InverterLossPowerPort:
+        return self.port_bundle.inverter_loss  # type: ignore[return-value]
+
+    @property
+    def ports(self) -> list[PowerPort]:
+        return self.port_bundle.all
 
     # @todo introduce new CONST for C-Rate as charge_optimum
     def setLimits(self, charge: int, discharge: int) -> None:
@@ -228,22 +229,22 @@ class ZendureDevice(EntityDevice):
         return 0 if level <= soc else min(999, self.kWh * 10 / power * (level - soc))
 
     async def entityWrite(self, entity: EntityZendure, value: Any) -> None:
-        await mqtt_protocol.mqtt_entity_write(self, entity, value)
+        await self.mqtt_handler.entity_write(entity, value)
 
     async def button_press(self, _key: str) -> None:
         return
 
     def mqttPublish(self, topic: str, command: Any, client: mqtt_client.Client | None = None) -> None:
-        mqtt_protocol.mqtt_publish(self, topic, command, client)
+        self.mqtt_handler.publish(topic, command, client)
 
     def mqttInvoke(self, command: Any) -> None:
-        mqtt_protocol.mqtt_invoke(self, command)
+        self.mqtt_handler.invoke(command)
 
     async def mqttProperties(self, payload: Any) -> None:
-        await mqtt_protocol.mqtt_properties(self, payload)
+        await self.mqtt_handler.properties(payload)
 
     def mqttMessage(self, topic: str, payload: Any) -> bool:
-        return mqtt_protocol.mqtt_message(self, topic, payload)
+        return self.mqtt_handler.message(topic, payload)
 
     async def mqttSelect(self, _select: ZendureRestoreSelect, _value: Any) -> None:
         # During restore, api is not yet assigned — skip until loadDevices() completes
@@ -333,38 +334,8 @@ class ZendureDevice(EntityDevice):
         return self.offgridPort.power if self.offgridPort else 0
 
     def update_power_flow_state(self) -> None:
-        """Bestimmt den Ist-Zustand basierend auf Port-Daten."""
-        # WAKEUP bleibt, bis abs(batteryPort.power) > POWER_IDLE_OFFSET
-        if self.power_flow_state == PowerFlowState.WAKEUP:
-            if abs(self.batteryPort.power) <= SmartMode.POWER_IDLE_OFFSET:
-                return
-            # Gerät hat geantwortet → Übergangszeitpunkt für Ramping merken
-            self.wakeup_entered = datetime.now()
-        prev_state = self.power_flow_state
-
-        if self.state == DeviceState.OFFLINE:
-            self.power_flow_state = PowerFlowState.OFF
-            self.power_flow_sensor.update_value(self.power_flow_state.value)
-            return
-
-        if self.state == DeviceState.SOCFULL:
-            self.power_flow_state = PowerFlowState.DISCHARGE if self.batteryPort.is_discharging else PowerFlowState.IDLE
-        elif self.state == DeviceState.SOCEMPTY:
-            self.power_flow_state = PowerFlowState.CHARGE if self.batteryPort.is_charging else PowerFlowState.IDLE
-        else:  # DeviceState.ACTIVE
-            if self.batteryPort.is_charging:
-                self.power_flow_state = PowerFlowState.CHARGE
-            elif self.batteryPort.is_discharging:
-                self.power_flow_state = PowerFlowState.DISCHARGE
-            else:
-                self.power_flow_state = PowerFlowState.IDLE
-
-        if self.power_flow_state != prev_state:
-            _LOGGER.debug("PowerFlow %s: %s → %s (state=%s soc=%s)",
-                          self.name, prev_state.name, self.power_flow_state.name,
-                          self.state.name, self.electricLevel.asInt)
-        self.power_flow_sensor.update_value(self.power_flow_state.value)
-        self.inverterLoss.update_value(self.inverterLossPort.power)
+        """Delegiert an den `DevicePowerFlowStateMachine`-Kollaborator."""
+        self.state_machine.update()
 
     @property
     def pwr_produced(self) -> int:

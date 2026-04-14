@@ -1,5 +1,30 @@
 # Vorschlag 03: Polling-Intervall bei minSoC-Block reduzieren
 
+## Status: Umgesetzt (2026-04-14)
+
+Umsetzung verteilt auf drei Stellen:
+
+- `const.py:95` — neue Konstante `SmartMode.SLOW_POLL_INTERVAL = 60`.
+- `power_strategy.py:75-89` — neuer Helper `all_devices_blocked_no_solar(mgr)`:
+  prüft alle **online** Geräte auf `SoC <= minSoC + DISCHARGE_SOC_BUFFER` und
+  `solarPort.total_solar_power == 0`.
+- `manager.py:516-523` — in `_p1_changed` wird `zero_next` auf
+  `SLOW_POLL_INTERVAL` gesetzt, wenn `avg > 0` (Demand) und der Helper `True`
+  liefert. Die bestehende `isFast`-Logik (`manager.py:507`) bleibt unberührt,
+  d. h. plötzliche P1-Spikes umgehen den Slow-Poll weiterhin.
+
+Abweichungen vom ursprünglichen Vorschlag:
+
+- **`avg > 0` statt `setpoint > 0`** — der Manager hat keinen direkten
+  Setpoint-Zugriff, `avg` ist der geglättete Wert, der an `powerChanged`
+  übergeben wurde.
+- **Online-Filter (`d.online`)** — inaktive Geräte dürfen den Slow-Poll nicht
+  blockieren (wären sonst Trap für jedes offline-Gerät).
+
+Tests: `tests/test_slow_poll.py` — 10 Fälle (leere Geräteliste, Boundary bei
+`minSoC + DISCHARGE_SOC_BUFFER`, Offline-Geräte in beide Richtungen, Solar als
+Blocker des Slow-Poll, gemischte Batches).
+
 ## Priorität: Niedrig
 
 ## Problem

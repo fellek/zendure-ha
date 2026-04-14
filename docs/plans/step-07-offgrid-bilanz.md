@@ -31,7 +31,7 @@ def pwr_produced(self) -> int:
 ```python
 async def _classify_devices(mgr: ZendureManager) -> tuple[int, float, int]:
     available_kwh: float = 0
-    setpoint = mgr.grid_port.power
+    setpoint = mgr.grid_smartmeter.power
     power = 0
 
     # offgrid_map entfällt komplett

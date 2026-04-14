@@ -31,7 +31,16 @@ angrenzenden Dateien.
 | Datei | Titel | Priorität |
 |-------|-------|-----------|
 | [vorschlag-01-matching-charge-early-return.md](vorschlag-01-matching-charge-early-return.md) | MATCHING_CHARGE: Early-return statt distribute_discharge(0) | Mittel |
-| [vorschlag-02-stop-state-check.md](vorschlag-02-stop-state-check.md) | Stop-Kommando nur wenn Gerät nicht IDLE | Mittel |
-| [vorschlag-03-polling-minsoc.md](vorschlag-03-polling-minsoc.md) | Polling-Intervall bei minSoC-Block reduzieren | Niedrig |
+| [vorschlag-02-stop-state-check.md](vorschlag-02-stop-state-check.md) | Stop-Kommando nur wenn Gerät nicht IDLE | **Umgesetzt** |
+| [vorschlag-03-polling-minsoc.md](vorschlag-03-polling-minsoc.md) | Polling-Intervall bei minSoC-Block reduzieren | **Umgesetzt** |
 | [vorschlag-04-selfconsumption-sensor.md](vorschlag-04-selfconsumption-sensor.md) | Selfconsumption virtueller Sensor | Niedrig |
 | [vorschlag-05-rename-variables.md](vorschlag-05-rename-variables.md) | Variablen umbenennen (home, kWh, ConnectorPort) | Niedrig |
+| [vorschlag-06-device-god-class-split.md](vorschlag-06-device-god-class-split.md) | `ZendureDevice` in MQTT/State/Ports aufteilen | **Umgesetzt** |
+| [vorschlag-07-manager-port-registry.md](vorschlag-07-manager-port-registry.md) | `DevicePortRegistry` — Manager ↔ Device Port-Init entkoppeln | Hoch |
+| [vorschlag-08-distribute-power-context.md](vorschlag-08-distribute-power-context.md) | `_distribute_power()` Context-Dataclass + Clock-Abstraktion | Mittel |
+| [vorschlag-09-inverter-loss-per-model.md](vorschlag-09-inverter-loss-per-model.md) | `InverterLossPowerPort` — Modellwerte pro Gerät konfigurierbar | Mittel |
+| [vorschlag-10-power-charge-discharge-symmetry.md](vorschlag-10-power-charge-discharge-symmetry.md) | `power_charge` / `power_discharge` Spiegel-Duplikate zusammenführen | Mittel |
+| [vorschlag-11-hysteresis-suppression-dry.md](vorschlag-11-hysteresis-suppression-dry.md) | `apply_device_suppression()` Charge/Discharge-Zweige vereinheitlichen | Niedrig |
+| [vorschlag-12-mode-dispatch-branch-helper.md](vorschlag-12-mode-dispatch-branch-helper.md) | `_branch_by_sign()` Helper für Mode-Dispatch | Niedrig |
+| [vorschlag-13-classification-power-semantik.md](vorschlag-13-classification-power-semantik.md) | `_classify_single_device()` Semantik von `connector_power` / `net_battery` klären | Niedrig |
+| [vorschlag-14-stop-discharge-test-alignment.md](vorschlag-14-stop-discharge-test-alignment.md) | STOP_DISCHARGE — Kommentar & Tests an Bug-#9-Fix angleichen | Niedrig |

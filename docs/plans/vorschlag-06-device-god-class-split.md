@@ -1,5 +1,26 @@
 # Vorschlag 06: `ZendureDevice` — God-Class aufteilen
 
+## Status: Umgesetzt
+
+Drei Kollaboratoren extrahiert in `custom_components/zendure_ha/device_components.py`:
+
+- `DevicePortBundle` — kapselt Aufbau und Liste aller `PowerPort`-Instanzen.
+- `DevicePowerFlowStateMachine` — enthält die ehemalige `update_power_flow_state`-Logik
+  und ist isoliert testbar (siehe `tests/test_device_state_machine.py`).
+- `MqttProtocolHandler` — Objektfassade über `mqtt_protocol`, mit lazy-Import,
+  damit Tests keine Home-Assistant-Abhängigkeiten ziehen.
+
+`ZendureDevice` hält die drei Kollaboratoren (`self.port_bundle`,
+`self.state_machine`, `self.mqtt_handler`) und stellt die bisherigen
+Port-Attribute (`batteryPort`, `connectorPort`, `solarPort`, `offgridPort`,
+`inverterLossPort`, `ports`) als Properties bereit, damit aufrufende Module
+(`manager.py`, `power_strategy.py`, `fusegroup.py`, `mqtt_protocol.py`,
+`power_port.py`, Subklassen in `devices/`) unverändert funktionieren.
+
+`update_power_flow_state()` ist zur reinen Delegation auf die State-Maschine
+geschrumpft; `mqttPublish/Invoke/Properties/Message/entityWrite` delegieren
+an den Handler.
+
 ## Priorität: Hoch
 
 ## Problem
