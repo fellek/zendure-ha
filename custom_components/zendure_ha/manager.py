@@ -514,7 +514,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 _LOGGER.error("Error in power distribution: %s", err)
                 _LOGGER.error(traceback.format_exc())
             time = datetime.now()
-            self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
+            # Vorschlag 03: slow down dispatch when nothing can change — all online
+            # devices at minSoC, no solar, and current demand (avg>0) means discharge
+            # is impossible. An `isFast` P1 spike still bypasses `zero_next` (line 507).
+            if avg > 0 and power_strategy.all_devices_blocked_no_solar(self):
+                self.zero_next = time + timedelta(seconds=SmartMode.SLOW_POLL_INTERVAL)
+            else:
+                self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
             self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
 
     def _reset_power_state(self) -> None:

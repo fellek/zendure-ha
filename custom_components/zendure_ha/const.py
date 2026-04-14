@@ -92,6 +92,7 @@ class SmartMode:
 
     TIMEFAST = 1.5  # default: 2.2 Fast update interval after significant change
     TIMEZERO = 4  # default: 4 Normal update interval
+    SLOW_POLL_INTERVAL = 60  # Dispatch interval when all devices are minSoC-blocked without solar
 
     # Standard deviation thresholds for detecting significant changes
     P1_STDDEV_FACTOR = 3.5  # Multiplier for P1 meter stddev calculation
@@ -102,8 +103,15 @@ class SmartMode:
 
     HEMSOFF_TIMEOUT = 60  # Seconds before HEMS state is set to OFF if no updates are received
 
+    # --- Hardware Quirks (Inverter Eigenheiten) ---
+    POWER_IDLE_OFFSET = 10
+    # Erklärung: Manche Wechselrichter (z.B. SF2400) zeigen beim reinen Durchleiten
+    # (Bypass/Offgrid) parasitäre Leistung oder schalten sich ab, wenn exakt 0W gefordert werden.
+    # Dieses Offset (10W) wird gesetzt, wenn ein Gerät eigentlich 0W machen soll,
+    # aber das MQTT-Kommando "10W" benötigt, um nicht in den Standby zu fallen.
+
     POWER_START = 50  # Minimum Power (W) for starting a device
-    POWER_TOLERANCE = 10  # Device-level power tolerance (W) before updating
+    POWER_TOLERANCE = POWER_IDLE_OFFSET - 2  # Device-level power tolerance (W) before updating
     BYPASS_WAKE_COOLDOWN = 60  # Seconds between bypass-wake Pass 1 commands per device
     WAKEUP_RAMP_DURATION = 30  # Seconds of soft-start ramp after WAKEUP→CHARGE/DISCHARGE transition
     WAKE_TIMEOUT = 15  # Seconds a device may remain in WAKEUP before being re-classified as IDLE
@@ -141,13 +149,6 @@ class SmartMode:
     HYSTERESIS_SLOW_COOLDOWN = 20
     # Erklärung: Zeit in Sekunden (1 Min), die der Manager bei "langsamem" Cooldown wartet.
     # Schützt das Netz vor schnellen Lastwechseln, wenn der Akku gerade erst gestoppt hat.
-
-    # --- Hardware Quirks (Inverter Eigenheiten) ---
-    POWER_IDLE_OFFSET = 10
-    # Erklärung: Manche Wechselrichter (z.B. SF2400) zeigen beim reinen Durchleiten
-    # (Bypass/Offgrid) parasitäre Leistung oder schalten sich ab, wenn exakt 0W gefordert werden.
-    # Dieses Offset (10W) wird gesetzt, wenn ein Gerät eigentlich 0W machen soll,
-    # aber das MQTT-Kommando "10W" benötigt, um nicht in den Standby zu fallen.
 
     # Mit DISCHARGE_SOC_BUFFER = 2 stoppt die HA-Steuerung bei MinSOC + 2%.
     # Der SF2400 AC darf selbst dann noch die restlichen 2% abbauen.
