@@ -13,7 +13,7 @@
 | Class | `AcMode` | `AcDirection` | Es beschreibt die Richtung (INPUT/OUTPUT), nicht einen "Mode" |
 | Class | `DeviceState` | ok | -- |
 | Class | `ManagerMode` | ok | -- |
-| Class | `ManagerState` | ok | -- |
+| Class | `PowerFlowState` | ok (ehem. `ManagerState` — 2026-04: umbenannt, Werte von IDLE/OFF getauscht) | -- |
 | Class | `SmartMode` | `SmartModeConstants` oder `PowerConfig` | Ist kein Mode, sondern eine Sammlung von Konstanten/Thresholds |
 | Const | `CONF_HAKEY` | `CONF_HA_SECRET` | Klarere Bedeutung |
 

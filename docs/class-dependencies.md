@@ -24,7 +24,8 @@ graph TD
     
     Strategy["power_strategy.py (Verteil-Logik)"]:::logic
     FuseGroup["fusegroup.py (Gruppen-Logik)"]:::logic
-    PowerPort["power_port.py (Abstraktion)"]:::logic
+    PowerPort["power_port.py (PowerPort-Hierarchie:<br/>GridSmartmeter, ConnectorPowerPort,<br/>BatteryPowerPort, DcSolarPowerPort,<br/>OffGridPowerPort, InverterLossPowerPort)"]:::logic
+    Bypass["bypass_relay.py (BypassRelay:<br/>MQTT 'pass'-Kanal)"]:::logic
     
     BinSensor["binary_sensor.py (HA Entität)"]:::entity
     Entities["andere Entitäten<br/>(sensor, number, select...)"]:::entity
@@ -50,7 +51,8 @@ graph TD
     %% Geräte Ebene
     SDK -- "erbt von" --> Device
     Device -- "instanziiert" --> Battery
-    Device -- "nutzt (Solar/Offgrid)" --> PowerPort
+    Device -- "besitzt PowerPorts" --> PowerPort
+    Device -- "besitzt" --> Bypass
     Device -- "gehört zu" --> FuseGroup
     
     %% Entitäten
@@ -81,7 +83,14 @@ Das Diagramm ist in vier logische Bereiche unterteilt:
 4.  **Logik & Strategie (Grün):**
     *   **`power_strategy.py`**: Enthält die komplexe Mathematik, um决定 (zu entscheiden), wie viel Leistung auf welche Geräte verteilt wird (basierend auf SOC, Limits und PV-Leistung). Wird vom Manager aufgerufen.
     *   **`fusegroup.py`**: Verwaltung von Gerätegruppen, um sicherzustellen, dass die Summe der Leistung einer Gruppe nicht bestimmte Grenzen überschreitet.
-    *   **`power_port.py`**: Abstraktionsschicht. Sie definiert, was ein "Eingang" oder "Ausgang" ist (z.B. Grid-Port, Solar-Port). Dies hilft dem Manager und der Strategie, Geräte einheitlich zu behandeln.
+    *   **`power_port.py`**: Abstraktionsschicht über die verschiedenen Strom-Anschlusspunkte eines Geräts. Jede konkrete `PowerPort`-Unterklasse liefert eine einheitliche `power`-Eigenschaft (Vorzeichen-Konvention: + = Verbrauch, − = Erzeugung):
+        *   `GridSmartmeter` — externer P1-Zähler (vom `Manager` gehalten)
+        *   `ConnectorPowerPort` — AC-Hausanschluss des Geräts (`gridInputPower` / `outputHomePower`)
+        *   `BatteryPowerPort` — Netto-Akkuleistung (`batteryOutput` − `batteryInput`)
+        *   `DcSolarPowerPort` — Summe aller DC-Solareingänge (input-only)
+        *   `OffGridPowerPort` — integrierte Offgrid-Steckdose (Verbrauch / Einspeisung externer Quellen)
+        *   `InverterLossPowerPort` — Schätzung des Inverter-Selbstverbrauchs (Energiebilanz oder Modellwert; siehe [power-inverter-loss-selfconsumption.md](power-inverter-loss-selfconsumption.md))
+    *   **`bypass_relay.py`**: `BypassRelay` kapselt den MQTT-`pass`-Kanal als typisierte HA-Binary-Entity plus Modus-Sensor (`off` / `reverse` / `input`). Details zur Interaktion mit dem `PowerFlowState` in [power-classification-bypass-description.md](power-classification-bypass-description.md).
 
 ### Wichtige Abhängigkeiten
 

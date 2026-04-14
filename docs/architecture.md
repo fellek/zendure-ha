@@ -97,7 +97,10 @@ custom_components/zendure_ha/
 │
 ├── Power Management
 ├── power_strategy.py              # Smart Mode, power distribution algorithm
-├── power_port.py                  # GridSmartmeter, OffGridPowerPort, DcSolarPowerPort
+├── power_port.py                  # PowerPort hierarchy: GridSmartmeter, ConnectorPowerPort,
+│                                  #   BatteryPowerPort, OffGridPowerPort, DcSolarPowerPort,
+│                                  #   InverterLossPowerPort
+├── bypass_relay.py                # BypassRelay (MQTT 'pass' channel: off/reverse/input)
 ├── fusegroup.py                   # Fuse Group (circuit breaker) management
 │
 ├── Supporting
@@ -127,10 +130,11 @@ custom_components/zendure_ha/
 | `zendure_sdk.py` | HTTP API client for ZenSDK devices |
 | `ble.py` | Bluetooth communication (device discovery, setup) |
 | `power_strategy.py` | **Smart Mode algorithm**: device classification, setpoint calculation, power distribution |
-| `power_port.py` | Data models for grid/solar/offgrid power flows |
+| `power_port.py` | Data models for grid/connector/battery/solar/offgrid power flows and inverter-loss estimation |
+| `bypass_relay.py` | `BypassRelay` — typed wrapper around the MQTT `pass` channel (off / reverse / input) |
 | `fusegroup.py` | Circuit breaker limits enforcement |
 | `*_sensor.py, *_number.py, etc.` | Entity implementations for HA |
-| `const.py` | Enums, constants (DeviceState, ManagerMode, thresholds) |
+| `const.py` | Enums, constants (`DeviceState`, `ManagerMode`, `PowerFlowState`, `FuseGroupType`, `SmartMode` thresholds) |
 
 ---
 
@@ -230,19 +234,30 @@ Base class for all devices. Provides:
 
 ```python
 class ZendureDevice:
-    # Data attributes (updated from MQTT/API)
-    state: DeviceState              # OFFLINE, SOCEMPTY, INACTIVE, SOCFULL, ACTIVE
+    # Firmware state (see const.DeviceState)
+    state: DeviceState              # OFFLINE, SOCFULL, SOCEMPTY, ACTIVE
+    power_flow_state: PowerFlowState # OFF, CHARGE, DISCHARGE, IDLE, WAKEUP
+
+    # Raw sensor values (updated from MQTT/API)
     electricLevel: ZendureNumber    # Battery SOC (0-100%)
     batteryInput: ZendureNumber     # Current charge power (W)
     batteryOutput: ZendureNumber    # Current discharge power (W)
     homeInput: ZendureNumber        # Grid draw / charger input (W)
-    homeOutput: ZendureNumber       # Power to house (W)
-    
+    homeOutput: ZendureNumber       # Power fed into house (W)
+
+    # Typed PowerPorts (encapsulate raw sensors — see power_port.py)
+    connectorPort: ConnectorPowerPort       # AC grid connector (home in/out)
+    batteryPort: BatteryPowerPort           # Net battery flow
+    solarPort: DcSolarPowerPort | None      # Sum of DC solar inputs
+    offgridPort: OffGridPowerPort | None    # Built-in off-grid socket
+    inverterLossPort: InverterLossPowerPort # Estimated inverter self-consumption
+    bypass: BypassRelay                     # MQTT `pass` channel wrapper
+
     # Methods
-    async power_charge(power: int)   # Set charge setpoint
+    async power_charge(power: int)    # Set charge setpoint
     async power_discharge(power: int) # Set discharge setpoint
-    async power_off()               # Turn off device
-    async power_get()               # Fetch fresh state from API/MQTT
+    async power_off()                 # Turn off device
+    async power_get()                 # Fetch fresh state from API/MQTT
 ```
 
 ### DataUpdateCoordinator (manager.py)
