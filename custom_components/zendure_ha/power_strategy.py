@@ -364,7 +364,7 @@ async def _assess(mgr: ZendureManager, _p1: int, time: datetime) -> SystemSnapsh
 async def _classify_devices(mgr: ZendureManager) -> tuple[int, float, int]:
     """Classify each device and return (setpoint, available_kwh, power)."""
     available_kwh: float = 0
-    setpoint = mgr.grid_port.power
+    setpoint = mgr.grid_smartmeter.power
     power = 0
 
     for d in mgr.devices:

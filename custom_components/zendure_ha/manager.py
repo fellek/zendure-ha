@@ -41,7 +41,7 @@ from . import power_strategy
 from .power_strategy import HysteresisFilter
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureSensor
-from .power_port import DcSolarPowerPort, GridSmartmeter, OffGridPowerPort, PowerPort
+from .power_port import GridSmartmeter, PowerPort
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -67,7 +67,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.check_reset = datetime.min
         self.p1meterEvent: Callable[[], None] | None = None
         self.p1_history: deque[int] = deque([25, -25], maxlen=8)
-        self.grid_port = GridSmartmeter()
+        self.grid_smartmeter = GridSmartmeter()
         self.p1_factor = 1
         self.update_count = 0
 
@@ -477,7 +477,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         except ValueError: return
 
         # NEU: Zustand an Port delegieren
-        self.grid_port.update_state(p1)
+        self.grid_smartmeter.update_state(p1)
 
         # Get time & update simulation
         time = datetime.now()
