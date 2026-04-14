@@ -26,7 +26,7 @@ from .sensor import ZendureRestoreSensor, ZendureSensor
 from . import ble as ble_transport
 from . import mqtt_protocol
 from .battery import ZendureBattery
-from .power_port import PowerPort, ConnectorPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort
+from .power_port import PowerPort, ConnectorPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort, InverterLossPowerPort
 
 if TYPE_CHECKING:
     from .api import ZendureApi
@@ -130,6 +130,7 @@ class ZendureDevice(EntityDevice):
         self.aggrSolar = ZendureRestoreSensor(self, "aggrSolar", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSwitchCount = ZendureRestoreSensor(self, "switchCount", None, None, None, "total_increasing", 0)
         self.power_flow_sensor = ZendureSensor(self, "power_flow_state")
+        self.inverterLoss = ZendureSensor(self, "inverter_loss", None, "W", "power", "measurement")
 
     # NEU: Zentrale Initialisierung der Power Ports
     def _init_power_ports(self) -> None:
@@ -161,6 +162,10 @@ class ZendureDevice(EntityDevice):
             self.aggrOffGrid = ZendureRestoreSensor(self, "aggrGridOffPower", None, "kWh", "energy", "total_increasing", 2)
             self.offgridPort = OffGridPowerPort(self)
             self.ports.append(self.offgridPort)
+
+        # 3. Inverter Loss Port: Schätzung des Selbstverbrauchs (jedes Gerät hat Verluste)
+        self.inverterLossPort = InverterLossPowerPort(self)
+        self.ports.append(self.inverterLossPort)
 
     # @todo introduce new CONST for C-Rate as charge_optimum
     def setLimits(self, charge: int, discharge: int) -> None:
@@ -359,6 +364,7 @@ class ZendureDevice(EntityDevice):
                           self.name, prev_state.name, self.power_flow_state.name,
                           self.state.name, self.electricLevel.asInt)
         self.power_flow_sensor.update_value(self.power_flow_state.value)
+        self.inverterLoss.update_value(self.inverterLossPort.power)
 
     @property
     def pwr_produced(self) -> int:
