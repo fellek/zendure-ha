@@ -32,9 +32,15 @@ from custom_components.zendure_ha.power_strategy import (
 class _RecordingDevice:
     """Minimal ZendureDevice stand-in: records power_charge / power_discharge calls."""
 
-    def __init__(self, name: str = "sf2400", offgrid_consumption: int = 0) -> None:
+    def __init__(
+        self,
+        name: str = "sf2400",
+        offgrid_consumption: int = 0,
+        power_flow_state: PowerFlowState = PowerFlowState.CHARGE,
+    ) -> None:
         self.name = name
-        self.offgridPort = SimpleNamespace(consumption=offgrid_consumption)  # noqa: N815
+        self.offgridPort = SimpleNamespace(power_consumption=offgrid_consumption)  # noqa: N815
+        self.power_flow_state = power_flow_state
         self.calls: list[tuple[str, int]] = []
 
     async def power_charge(self, power: int) -> int:
@@ -92,6 +98,41 @@ async def test_regular_charge_and_discharge_unchanged() -> None:
     await apply_assignment(d, DeviceAssignment(Command.CHARGE, power=-500))
     await apply_assignment(d, DeviceAssignment(Command.DISCHARGE, power=300))
     assert d.calls == [("charge", -500), ("discharge", 300)]
+
+
+# ---------------------------------------------------------------------------
+#  Vorschlag 02 — STOP commands on an already-idle device are no-ops.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_charge_on_idle_device_is_noop() -> None:
+    """Rule (Vorschlag 02): STOP_CHARGE on a device already in IDLE must not
+    issue a hardware command — it used to spam ~300 redundant `Stopping charge
+    … with 0` log lines per hour. Return 0, record nothing.
+    """
+    d = _RecordingDevice(offgrid_consumption=0, power_flow_state=PowerFlowState.IDLE)
+    result = await apply_assignment(d, DeviceAssignment(Command.STOP_CHARGE))
+    assert result == 0
+    assert d.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stop_discharge_on_idle_device_is_noop() -> None:
+    d = _RecordingDevice(offgrid_consumption=50, power_flow_state=PowerFlowState.IDLE)
+    result = await apply_assignment(d, DeviceAssignment(Command.STOP_DISCHARGE))
+    assert result == 0
+    assert d.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stop_charge_on_charging_device_still_fires() -> None:
+    """Sanity check for Vorschlag 02: the IDLE-skip must NOT swallow legitimate
+    stop commands on devices that are actively charging/discharging.
+    """
+    d = _RecordingDevice(offgrid_consumption=0, power_flow_state=PowerFlowState.CHARGE)
+    await apply_assignment(d, DeviceAssignment(Command.STOP_CHARGE))
+    assert d.calls == [("discharge", 0)]
 
 
 # ---------------------------------------------------------------------------

@@ -72,6 +72,23 @@ CHARGE_DIR = _DistDirection("Charge", -1, True)
 DISCHARGE_DIR = _DistDirection("Discharge", +1, False)
 
 
+def all_devices_blocked_no_solar(mgr: ZendureManager) -> bool:
+    """True if all online devices are at/below the minSoC discharge limit AND no
+    solar power is available. In this state no dispatch decision can change the
+    outcome until external conditions shift, so the caller may safely slow the
+    polling cadence (see `SmartMode.SLOW_POLL_INTERVAL`).
+    """
+    online = [d for d in mgr.devices if d.online]
+    if not online:
+        return False
+    for d in online:
+        if d.electricLevel.asInt > int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER:
+            return False
+        if d.solarPort and d.solarPort.total_solar_power > 0:
+            return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 #  Hysteresis state: prevents rapid on/off cycling of devices
 # ---------------------------------------------------------------------------
@@ -129,6 +146,10 @@ async def apply_assignment(d: Any, assignment: DeviceAssignment) -> int:
         return await d.power_charge(assignment.power)
     if cmd == Command.DISCHARGE:
         return await d.power_discharge(assignment.power)
+
+    # Skip redundant stop commands when device is already idle (Vorschlag 02).
+    if d.power_flow_state == PowerFlowState.IDLE:
+        return 0
 
     offgrid_consumption = d.offgridPort.power_consumption if d.offgridPort else 0
     if cmd == Command.STOP_CHARGE:
@@ -432,7 +453,8 @@ async def _dispatch_to_mode(mgr: ZendureManager, p1: int, setpoint: int, isFast:
             if setpoint > 0 and mgr.produced > SmartMode.POWER_START and mgr.operation == ManagerMode.MATCHING_CHARGE:
                 await distribute_discharge(mgr, min(mgr.produced, setpoint), time)
             elif setpoint > 0:
-                await distribute_discharge(mgr, 0, time)
+                pass
+                #await distribute_discharge(mgr, 0, time)
             else:
                 await distribute_charge(mgr, min(0, setpoint), time)
 
