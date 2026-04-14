@@ -87,6 +87,7 @@ class ZendureZenSdk(ZendureDevice):
 
     async def power_off(self) -> None:
         """Set the power off."""
+        _LOGGER.info("Power off %s => %s", self.name)
         await self.doCommand({"properties": {"smartMode": 0, "acMode": 2, "outputLimit": 0, "inputLimit": 0}})
 
     async def doCommand(self, command: Any) -> None:
