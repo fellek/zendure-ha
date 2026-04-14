@@ -626,9 +626,11 @@ async def _distribute_power(
                               d.name, d.electricLevel.asInt, min_soc_limit)
                 pwr = 0
 
+        # @todo turn of ramp
         # Soft-start ramp (post-wakeup, near minSoc/maxSoc boundaries)
         if time is not None and pwr != 0:
-            pwr = int(pwr * _ramp_factor(d, soc, is_charge, time))
+            pwr = pwr
+            #pwr = int(pwr * _ramp_factor(d, soc, is_charge, time))
 
         # Apply power
         actual_pwr = await d.power_charge(pwr) if is_charge else await d.power_discharge(pwr)
