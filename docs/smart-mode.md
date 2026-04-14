@@ -144,14 +144,16 @@ Each device has an internal state machine:
      │ (reconnect)
      ▼
 ┌─────────────┐
-│ SOCEMPTY    │  SOC ≤ minSOC (battery critically low)
+│ SOCEMPTY    │  SOC ≤ minSOC (battery critically low — charge only)
 ├─────────────┤
-│ INACTIVE    │  SOC between minSOC and socSet
+│ ACTIVE      │  SOC between minSOC and socSet (normal operation)
 ├─────────────┤
-│ SOCFULL     │  SOC ≥ socSet (target reached, stop charging)
+│ SOCFULL     │  SOC ≥ socSet (target reached — discharge only)
 └─────────────┘
-     │
-     └─ ACTIVE (above minSOC, charging/discharging)
+
+Note: `DeviceState` describes only the firmware-level charge/discharge gate.
+The live charge/discharge/idle/wakeup behavior is carried by `PowerFlowState`
+(see const-documentation.md).
 ```
 
 ---

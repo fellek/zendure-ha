@@ -21,7 +21,7 @@ Hier ist die detaillierte Analyse:
 *   **Situation:** Reaktion des SF2400 AC auf das `0W` Kommando.
 *   **Ablauf:** 
     *   23:04:56: `gridInputPower` fällt von 501W auf 0W. `packInputPower` fällt auf 0W. Der Inverter stoppt sofort.
-    *   **Anomalie:** `outputHomePower` springt auf 10W, `packState` wird 2 (INACTIVE). Das ist der "Parasitäre" Bypass, den `POWER_IDLE_OFFSET` abfangen soll.
+    *   **Anomalie:** `outputHomePower` springt auf 10W, `packState` wird 2 (Firmware-Standby; heute als `DeviceState.ACTIVE` + `PowerFlowState.IDLE` geführt). Das ist der "Parasitäre" Bypass, den `POWER_IDLE_OFFSET` abfangen soll.
 *   **Bewertung:** Der Inverter zeigt, dass er mechanisch ca. 1-2 Sekunden braucht, um die Relais nach dem 0W-Befehl physisch zu trennen.
 
 ### Abschnitt 4: 23:05:00 – 23:05:18 (🚨 DER BUG: Die Drehstuhl-Situation)
@@ -71,7 +71,7 @@ Deine Konstanten sind fertig optimiert. Was du jetzt im Code beheben musst, ist 
 **Die aktuelle Logik:**
 ```python
 home = -d.homeInput.asInt + offgrid_power
-if home < 0:
+if connector_power < 0:
     mgr.charge.append(d) # Falsch, wenn homeInput nur Standby/Passthrough ist!
 ```
 

@@ -26,7 +26,7 @@ from .sensor import ZendureRestoreSensor, ZendureSensor
 from . import ble as ble_transport
 from . import mqtt_protocol
 from .battery import ZendureBattery
-from .power_port import PowerPort, ConnectorPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort
+from .power_port import PowerPort, ConnectorPowerPort, BatteryPowerPort, DcSolarPowerPort, OffGridPowerPort, InverterLossPowerPort
 
 if TYPE_CHECKING:
     from .api import ZendureApi
@@ -130,6 +130,7 @@ class ZendureDevice(EntityDevice):
         self.aggrSolar = ZendureRestoreSensor(self, "aggrSolar", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSwitchCount = ZendureRestoreSensor(self, "switchCount", None, None, None, "total_increasing", 0)
         self.power_flow_sensor = ZendureSensor(self, "power_flow_state")
+        self.inverterLoss = ZendureSensor(self, "inverter_loss", None, "W", "power", "measurement")
 
     # NEU: Zentrale Initialisierung der Power Ports
     def _init_power_ports(self) -> None:
@@ -161,6 +162,10 @@ class ZendureDevice(EntityDevice):
             self.aggrOffGrid = ZendureRestoreSensor(self, "aggrGridOffPower", None, "kWh", "energy", "total_increasing", 2)
             self.offgridPort = OffGridPowerPort(self)
             self.ports.append(self.offgridPort)
+
+        # 3. Inverter Loss Port: Schätzung des Selbstverbrauchs (jedes Gerät hat Verluste)
+        self.inverterLossPort = InverterLossPowerPort(self)
+        self.ports.append(self.inverterLossPort)
 
     # @todo introduce new CONST for C-Rate as charge_optimum
     def setLimits(self, charge: int, discharge: int) -> None:
@@ -263,7 +268,7 @@ class ZendureDevice(EntityDevice):
         """Set the MQTT server for the device via BLE."""
         return await ble_transport.ble_mqtt(self, mqtt)
 
-    async def power_get(self) -> bool:
+    async def update_state(self) -> bool:
         if self.lastseen < datetime.now():
             self.lastseen = datetime.min
             self.setStatus()
@@ -291,10 +296,10 @@ class ZendureDevice(EntityDevice):
         power = min(0, max(power, self.charge_limit))
         if power == 0 and self.state == DeviceState.SOCEMPTY and self.bypass.is_active:
             _LOGGER.debug("Power charge %s => no action [SOCEMPTY bypass hold]", self.name)
-            return self.connectorPort.grid_consumption
+            return self.connectorPort.power_consumption
         if abs(power + self.connectorPort.power) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
-            return self.connectorPort.grid_consumption
+            return self.connectorPort.power_consumption
         return await self.charge(power)
 
     async def discharge(self, _power: int) -> int:
@@ -306,7 +311,7 @@ class ZendureDevice(EntityDevice):
         power = max(0, min(power, self.discharge_limit))
         if abs(power - self.connectorPort.power) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)
-            return self.connectorPort.feed_in
+            return self.connectorPort.power_production
         return await self.discharge(power)
 
     async def power_off(self) -> None:
@@ -359,15 +364,16 @@ class ZendureDevice(EntityDevice):
                           self.name, prev_state.name, self.power_flow_state.name,
                           self.state.name, self.electricLevel.asInt)
         self.power_flow_sensor.update_value(self.power_flow_state.value)
+        self.inverterLoss.update_value(self.inverterLossPort.power)
 
     @property
     def pwr_produced(self) -> int:
         """Power produced internally (negative = generation). Computed from ports."""
-        solar = self.solarPort.total_raw_solar if self.solarPort else 0
-        offgrid_feed = self.offgridPort.feed_in if self.offgridPort else 0
+        solar = self.solarPort.total_solar_power if self.solarPort else 0
+        offgrid_feed = self.offgridPort.power_production if self.offgridPort else 0
         return min(0,
-                   self.batteryPort.discharge_power + self.connectorPort.grid_consumption
-                   - self.batteryPort.charge_power - self.connectorPort.feed_in - solar - offgrid_feed)
+                   self.batteryPort.discharge_power + self.connectorPort.power_consumption
+                   - self.batteryPort.charge_power - self.connectorPort.power_production - solar - offgrid_feed)
 
 
 class ZendureLegacy(ZendureDevice):

@@ -18,11 +18,11 @@ sichtbar), die in die Bilanz einfließen muss.
 @property
 def pwr_produced(self) -> int:
     """Intern produzierte Leistung (negativ = Erzeugung). Inkl. Solar + Offgrid-Einspeisung."""
-    solar = self.solarPort.total_raw_solar if self.solarPort else 0
-    offgrid_feed = self.offgridPort.feed_in if self.offgridPort else 0
+    solar = self.solarPort.total_solar_power if self.solarPort else 0
+    offgrid_feed = self.offgridPort.power_production if self.offgridPort else 0
     return min(0,
-               self.batteryPort.discharge_power + self.acPort.grid_consumption
-               - self.batteryPort.charge_power - self.acPort.feed_in
+               self.batteryPort.discharge_power + self.acPort.power_consumption
+               - self.batteryPort.charge_power - self.acPort.power_production
                - solar - offgrid_feed)
 ```
 
@@ -37,7 +37,7 @@ async def _classify_devices(mgr: ZendureManager) -> tuple[int, float, int]:
     # offgrid_map entfällt komplett
 
     for d in mgr.devices:
-        if not await d.power_get():    # setzt d.state + d.op_state
+        if not await d.update_state():  # setzt d.state + d.op_state
             continue
 
         mgr.produced -= d.pwr_produced

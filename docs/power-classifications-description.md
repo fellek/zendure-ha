@@ -47,7 +47,7 @@ Das Gerät bezieht aktiv Strom aus dem Hausnetz, mehr als es aus dem Offgrid-Por
 | offgrid_power | 0 W    | Kein Solar-Eingang am DC-Port        |
 | home (netto)  | -800 W | → CHARGE, setpoint_delta = -800 W    |
 | electricLevel | 42 %   | SoC                                  |
-| state         | INACTIVE / SOCEMPTY | Firmware-Zustand          |
+| state         | ACTIVE / SOCEMPTY | Firmware-Zustand            |
 
 ### Was passiert
 
@@ -100,7 +100,7 @@ Das Gerät liefert aktiv Strom ins Hausnetz oder an den Offgrid-Port.
 | offgrid_power | 0 W    | Kein aktiver AC-Ausgang      |
 | home (netto)  | 450 W  | setpoint_delta = 450 W       |
 | electricLevel | 71 %   | SoC                          |
-| state         | INACTIVE | Normalbetrieb                |
+| state         | ACTIVE | Normalbetrieb                  |
 
 ### Was passiert
 
@@ -153,7 +153,7 @@ Das Gerät ist betriebsbereit, liefert oder verbraucht aber keinen messbaren Str
 | homeInput     | 0 W     | Kein Netzbezug                           |
 | homeOutput    | 0 W     | Keine Netzeinspeisung                    |
 | offgrid_power | 0 W     | Kein DC-Ausgang                          |
-| state         | INACTIVE | Firmware meldet Standby                 |
+| state         | ACTIVE | Firmware meldet Standby (PowerFlowState.IDLE) |
 | electricLevel | 51 %    | SoC                                      |
 
 ### Was passiert

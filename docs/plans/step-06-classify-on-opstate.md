@@ -19,7 +19,7 @@ Die Zustandserkennung ist jetzt im Device (Step 4). Die Funktion wird vereinfach
 ```python
 def _classify_single_device(mgr: ZendureManager, d: ZendureDevice) -> tuple[int, int]:
     """Sortiert Device in Manager-Listen basierend auf dem Ist-Zustand."""
-    offgrid_load = d.offgridPort.consumption if d.offgridPort else 0
+    offgrid_load = d.offgridPort.power_consumption if d.offgridPort else 0
 
     match d.op_state:
         case ManagerState.BYPASS | ManagerState.SOCEMPTY | ManagerState.OFF:
@@ -29,12 +29,12 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice) -> tuple[int,
             return 0, 0
 
         case ManagerState.CHARGE | ManagerState.WAKEUP:
-            home = -d.acPort.grid_consumption + offgrid_load
+            home = -d.acPort.power_consumption + offgrid_load
             mgr.charge.append(d)
-            return home, -d.acPort.grid_consumption
+            return home, -d.acPort.power_consumption
 
         case ManagerState.DISCHARGE:
-            home = d.acPort.feed_in
+            home = d.acPort.power_production
             mgr.discharge.append(d)
             mgr.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
             mgr.discharge_produced -= d.pwr_produced
@@ -45,7 +45,7 @@ def _classify_single_device(mgr: ZendureManager, d: ZendureDevice) -> tuple[int,
             mgr.idle.append(d)
             mgr.idle_lvlmax = max(mgr.idle_lvlmax, d.electricLevel.asInt)
             mgr.idle_lvlmin = min(mgr.idle_lvlmin, d.electricLevel.asInt
-                                  if d.state != DeviceState.SOCFULL else 100)
+            if d.state != DeviceState.SOCFULL else 100)
             return 0, 0
 
     return 0, 0

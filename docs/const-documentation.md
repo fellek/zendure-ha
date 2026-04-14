@@ -50,17 +50,17 @@ Steuert den Betriebsmodus des AC-Ports.
 
 ### `DeviceState`
 
-Klassifizierter Betriebszustand eines Geräts, berechnet in `device.setStatus()`.
+Firmware-Zustand des Geräts. Die Werte spiegeln das Protokoll-Feld `socLimit` wider.
 
 | Wert | Bedeutung |
 |---|---|
 | `OFFLINE = 0` | Kein MQTT-Kontakt seit Timeout |
-| `SOCEMPTY = 1` | Akku leer (unter `minSoc`); Gerät darf nur laden, nicht entladen |
-| `INACTIVE = 2` | Gerät erreichbar, aktuell inaktiv (kein Leistungsfluss) |
-| `SOCFULL = 3` | Akku voll (SoC = 100%); Gerät darf nur entladen, nicht laden |
-| `ACTIVE = 4` | Gerät aktiv mit messbarem Leistungsfluss |
+| `SOCFULL = 1` | Akku voll (`socLimit=1`); Gerät darf nur entladen, nicht laden |
+| `SOCEMPTY = 2` | Akku leer (`socLimit=2`); Gerät darf nur laden, nicht entladen |
+| `ACTIVE = 3` | Normalbetrieb: Gerät erreichbar, Lade- und Entladebetrieb erlaubt |
 
-> `SOCEMPTY` entspricht `socLimit=2` auf Firmware-Ebene (→ `SmartMode.SOCEMPTY`).
+> Hinweis: `INACTIVE` existiert nicht mehr — frühere Idle-/Standby-Zustände fallen heute
+> unter `ACTIVE` und werden über `PowerFlowState` (siehe unten) differenziert.
 
 ---
 
@@ -79,16 +79,52 @@ Betriebsmodus des PowerStrategy-Managers, vom Benutzer einstellbar.
 
 ---
 
-### `ManagerState`
+### `PowerFlowState`
 
-Aktueller Zustand des Managers innerhalb eines Zyklus.
+Leistungsfluss-Zustand eines Geräts (ersetzt das frühere `ManagerState`-Enum).
+Wird pro Gerät in `device.update_power_flow_state()` gesetzt und als HA-Entity
+`power_flow_state` exportiert.
 
 | Wert | Bedeutung |
 |---|---|
-| `IDLE = 0` | Kein aktiver Lade- oder Entladevorgang |
-| `CHARGE = 1` | Manager verteilt gerade Ladepower |
-| `DISCHARGE = 2` | Manager verteilt gerade Entladepower |
-| `OFF = 3` | Manager ist abgeschaltet |
+| `OFF = 0` | Manager für dieses Gerät deaktiviert |
+| `CHARGE = 1` | Gerät lädt aktiv (entspricht `AcMode.INPUT`) |
+| `DISCHARGE = 2` | Gerät entlädt aktiv (entspricht `AcMode.OUTPUT`) |
+| `IDLE = 3` | Kein messbarer Fluss; Bypass (Relais `pass`) wird hier ebenfalls als IDLE geführt |
+| `WAKEUP = 5` | Übergang aus SOCEMPTY / aus Idle — Gerät wurde gerade reaktiviert |
+
+> **Breaking Change:** Die numerischen Werte von `OFF` (früher 3) und `IDLE`
+> (früher 0) wurden getauscht, damit `CHARGE=1` / `DISCHARGE=2` mit `AcMode`
+> übereinstimmen. HA-Automationen oder Dashboards, die hartcodierte Integer-
+> Vergleiche auf `power_flow_state` anwenden, müssen angepasst werden.
+
+> **Kein `BYPASS` mehr:** Der frühere `PowerFlowState.BYPASS` wurde entfernt.
+> Der Bypass-/Pass-Through-Zustand wird heute über die Klasse `BypassRelay`
+> (`bypass_relay.py`) beschrieben — siehe
+> [power-classification-bypass-description.md](power-classification-bypass-description.md).
+
+---
+
+### `FuseGroupType`
+
+Beschreibt Sicherungsgruppen (Leitungsschutz) mit zugehörigen Lade-/Entlade-Limits.
+Jeder Eintrag trägt einen numerischen Index, ein Label und die zulässigen
+`maxpower` / `minpower` (in Watt, Entlade-Richtung positiv, Lade-Richtung negativ).
+
+| Wert | Label | maxpower | minpower |
+|---|---|---|---|
+| `UNUSED` (0) | `unused` | 0 | 0 |
+| `OWNCIRCUIT` (1) | `owncircuit` | 3600 | -3600 |
+| `GROUP800` (2) | `group800` | 800 | -1200 |
+| `GROUP800_2400` (3) | `group800_2400` | 800 | -2400 |
+| `GROUP1200` (4) | `group1200` | 1200 | -1200 |
+| `GROUP2000` (5) | `group2000` | 2000 | -2000 |
+| `GROUP2400` (6) | `group2400` | 2400 | -2400 |
+| `GROUP3600` (7) | `group3600` | 3600 | -3600 |
+
+Hilfsmethoden:
+- `FuseGroupType.as_select_dict()` — Dict `{index: label}` für HA-Select-Entities
+- `FuseGroupType.from_label(label)` — Rückwärtslookup aus dem Label-String
 
 ---
 
@@ -109,10 +145,10 @@ Aktueller Zustand des Managers innerhalb eines Zyklus.
 
 | Konstante | Wert (s) | Beschreibung |
 |---|---|---|
-| `TIMEFAST` | `0.7` | **Harter Blackout** nach jedem `_distribute_power`-Aufruf. Kein Lade-/Entladebefehl kann schneller als dieser Wert folgen — auch nicht bei `isFast=True`. |
-| `TIMEZERO` | `1` | **Normaler Zyklustimer**: Mindestabstand zwischen zwei `_p1_changed`-Ausführungen im Normalfall. Kann durch `isFast` (hohe P1-Varianz) übersprungen werden. |
+| `TIMEFAST` | `1.5` | **Harter Blackout** nach jedem `_distribute_power`-Aufruf. Kein Lade-/Entladebefehl kann schneller als dieser Wert folgen — auch nicht bei `isFast=True`. |
+| `TIMEZERO` | `4` | **Normaler Zyklustimer**: Mindestabstand zwischen zwei `_p1_changed`-Ausführungen im Normalfall. Kann durch `isFast` (hohe P1-Varianz) übersprungen werden. |
 
-> Standardwerte in Kommentaren: `TIMEFAST` default 2.2 s, `TIMEZERO` default 4 s. Aktuelle Werte sind reduziert für schnellere Reaktion.
+> Kommentar in `const.py` nennt als Default `TIMEFAST=2.2 s`; aktueller Code nutzt `1.5 s` für schnellere Reaktion.
 
 ---
 
@@ -121,7 +157,7 @@ Aktueller Zustand des Managers innerhalb eines Zyklus.
 | Konstante | Wert | Beschreibung |
 |---|---|---|
 | `P1_STDDEV_FACTOR` | `3.5` | Multiplikator für die P1-Standardabweichung. Ein neuer P1-Wert gilt als "signifikant" wenn: `abs(delta) > factor * stddev`. |
-| `P1_STDDEV_MIN` | `3 W` | Untergrenze für die berechnete P1-Stddev. Verhindert, dass bei sehr stabilem Netz schon minimale Schwankungen als "isFast" gewertet werden. |
+| `P1_STDDEV_MIN` | `15 W` | Untergrenze für die berechnete P1-Stddev. Verhindert, dass bei sehr stabilem Netz schon minimale Schwankungen als "isFast" gewertet werden. |
 | `P1_MIN_UPDATE` | `400 ms` | Minimaler Abstand zwischen zwei P1-Updates (definiert, aber im aktuellen Code nicht ausgewertet). |
 
 ---
@@ -148,7 +184,10 @@ Aktueller Zustand des Managers innerhalb eines Zyklus.
 | Konstante | Wert | Beschreibung |
 |---|---|---|
 | `POWER_START` | `50 W` | Minimale Leistung zum Aufwecken eines Geräts aus dem Idle-Zustand. Wird als Puls gesendet: `charge(-POWER_START - pwr_offgrid)`. |
-| `POWER_TOLERANCE` | `5 W` | Mindestdifferenz zwischen geplantem und zuletzt gesendeten Setpoint. Liegt die Differenz darunter, wird kein neuer Befehl geschickt (Flattern vermeiden). |
+| `POWER_TOLERANCE` | `10 W` | Mindestdifferenz zwischen geplantem und zuletzt gesendeten Setpoint. Liegt die Differenz darunter, wird kein neuer Befehl geschickt (Flattern vermeiden). |
+| `BYPASS_WAKE_COOLDOWN` | `60 s` | Minimaler Abstand zwischen zwei Bypass-Wake-Pass-1-Kommandos pro Gerät. Verhindert, dass ein passives Gerät in Bypass-Stellung mehrfach pro Minute angestupst wird. |
+| `WAKEUP_RAMP_DURATION` | `30 s` | Dauer des Soft-Start-Rampens nach einem `WAKEUP → CHARGE/DISCHARGE`-Übergang. Der Setpoint wird während dieser Zeit schrittweise auf den Zielwert angehoben. |
+| `WAKE_TIMEOUT` | `15 s` | Maximale Verweildauer im `PowerFlowState.WAKEUP`. Läuft diese ab, ohne dass Leistung fließt, wird das Gerät wieder als `IDLE` klassifiziert. |
 
 ---
 
@@ -167,8 +206,8 @@ Aktueller Zustand des Managers innerhalb eines Zyklus.
 | Konstante | Wert | Beschreibung |
 |---|---|---|
 | `HYSTERESIS_LONG_COOLDOWN` | `300 s` | Referenzzeitraum (5 Min): War der letzte Lade-Stop länger als 300 s her, gilt der "schnelle" Wiedereinstieg. Liegt er darunter, wird der "langsame" Pfad gewählt. |
-| `HYSTERESIS_FAST_COOLDOWN` | `2 s` | Wartezeit im schnellen Cooldown-Pfad. Gerät darf 2 s nach dem letzten Stopp wieder starten. |
-| `HYSTERESIS_SLOW_COOLDOWN` | `60 s` | Wartezeit im langsamen Cooldown-Pfad (1 Min). Schützt das Netz vor schnellen Lastwechseln nach einem Lade-Stopp. |
+| `HYSTERESIS_FAST_COOLDOWN` | `5 s` | Wartezeit im schnellen Cooldown-Pfad. Gerät darf wenige Sekunden nach dem letzten Stopp wieder starten. |
+| `HYSTERESIS_SLOW_COOLDOWN` | `20 s` | Wartezeit im langsamen Cooldown-Pfad. Schützt das Netz vor schnellen Lastwechseln nach einem Lade-Stopp. |
 
 ---
 
@@ -177,3 +216,4 @@ Aktueller Zustand des Managers innerhalb eines Zyklus.
 | Konstante | Wert | Beschreibung |
 |---|---|---|
 | `POWER_IDLE_OFFSET` | `10 W` | Offset für Wechselrichter (z. B. SF2400), die bei einem exakten 0-W-Befehl in den Standby fallen. Statt `0 W` wird `10 W` gesendet, um den aktiven Durchleitbetrieb aufrechtzuerhalten. |
+| `DISCHARGE_SOC_BUFFER` | `2 %` | SoC-Puffer über `minSoc`, ab dem die HA-Steuerung das Entladen einstellt. Unterhalb `minSoc + 2 %` wird kein Discharge-Wakeup mehr ausgelöst; der Wechselrichter (z. B. SF2400 AC) darf die restlichen 2 % selbst abbauen. |

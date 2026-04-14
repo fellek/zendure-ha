@@ -33,7 +33,7 @@ all_blocked = all(
     for d in mgr.devices if d.online
 )
 no_solar = all(
-    (d.solarPort.total_raw_solar if d.solarPort else 0) == 0
+    (d.solarPort.total_solar_power if d.solarPort else 0) == 0
     for d in mgr.devices if d.online
 )
 if all_blocked and no_solar and setpoint > 0:
