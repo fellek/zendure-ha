@@ -134,6 +134,11 @@ class DevicePowerFlowStateMachine:
                 d.state.name,
                 d.electricLevel.asInt,
             )
+            if prev_state == PowerFlowState.WAKEUP and d.power_flow_state in (
+                PowerFlowState.CHARGE,
+                PowerFlowState.DISCHARGE,
+            ):
+                d.wakeup_committed = True
         d.power_flow_sensor.update_value(d.power_flow_state.value)
         d.inverterLoss.update_value(d.inverterLossPort.power)
 

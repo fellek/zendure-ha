@@ -228,6 +228,18 @@ class HysteresisFilter:
         """Zero only the per-device deficit accumulator (e.g. after a wake command)."""
         self.accumulator = 0
 
+    def reset(self) -> None:
+        """Voll-Reset: Cooldown, Direction-Tracker und Accumulator.
+
+        Wird nach einem frisch comitteten WAKEUP (WAKEUP → CHARGE/DISCHARGE)
+        aufgerufen. Der Direction-Change-Cooldown würde sonst den ersten
+        Zyklus nach dem Wake auf 0 zurückhalten und das Gerät sofort wieder
+        abwürgen (Abschalt-Transient → Moduswechsel-Flattern).
+        """
+        self._cooldown_until = datetime.min
+        self._last_direction = Direction.NONE
+        self.accumulator = 0
+
     def apply_device_suppression(self, pwr: int, is_charge: bool, start: int, optimal: int, state: DeviceState, label: str, name: str) -> int:
         """Apply per-device hysteresis to suppress underpowered devices.
 
@@ -496,8 +508,11 @@ async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) 
     # batteryInput über die is_charging-Schwelle kommt und der IDLE-Loop
     # durchbrochen wird.
     if not active_devices and mgr.idle and setpoint < -SmartMode.POWER_IDLE_OFFSET:
+        _LOGGER.debug("Charge cold-start: entered (idle=%d, setpoint=%s)", len(mgr.idle), setpoint)
+        woken = False
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt):
             if d.state == DeviceState.SOCFULL:
+                _LOGGER.debug("Charge cold-start: skip %s [SOCFULL]", d.name)
                 continue
             wake_power = max(setpoint, d.charge_limit)  # beides negativ; charge_limit ist untere Schranke
             _LOGGER.debug("Charge: cold-start wake %s => power_charge(%s)", d.name, wake_power)
@@ -505,7 +520,10 @@ async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) 
             if d.power_flow_state == PowerFlowState.IDLE:
                 d.power_flow_state = PowerFlowState.WAKEUP
                 d.wakeup_entered = time
+            woken = True
             break  # ein Gerät pro Zyklus aufwecken
+        if not woken:
+            _LOGGER.debug("Charge cold-start: no eligible idle device (all SOCFULL)")
 
     await _distribute_power(mgr, active_devices, setpoint, CHARGE_DIR, time)
 
@@ -528,12 +546,16 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int, time: datetim
     # Echten Setpoint-Anteil senden (nicht nur 10W Keepalive), sonst bleibt
     # batteryOutput auf der is_discharging-Schwelle stehen und IDLE-Loop zementiert.
     if not mgr.discharge and mgr.idle and setpoint > SmartMode.POWER_IDLE_OFFSET:
+        _LOGGER.debug("Discharge cold-start: entered (idle=%d, setpoint=%s)", len(mgr.idle), setpoint)
+        woken = False
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt, reverse=True):
             if d.state == DeviceState.SOCEMPTY:
+                _LOGGER.debug("Discharge cold-start: skip %s [SOCEMPTY]", d.name)
                 continue
             min_soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
             if d.electricLevel.asInt <= min_soc_limit:
-                _LOGGER.debug("Discharge Wakeup blocked: %s SoC=%s%% at minSoc limit", d.name, d.electricLevel.asInt)
+                _LOGGER.debug("Discharge cold-start: skip %s SoC=%s%% at minSoc limit (%s)",
+                              d.name, d.electricLevel.asInt, min_soc_limit)
                 continue
             # @todo review this condition, becaus its different to distribute_charge()
             wake_power = min(setpoint, d.discharge_limit)
@@ -545,7 +567,10 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int, time: datetim
             if d.power_flow_state == PowerFlowState.IDLE:
                 d.power_flow_state = PowerFlowState.WAKEUP
                 d.wakeup_entered = time
+            woken = True
             break  # ein Gerät pro Zyklus aufwecken
+        if not woken:
+            _LOGGER.debug("Discharge cold-start: no eligible idle device (all SOCEMPTY or below minSoc)")
 
     # Determine if we only need to pass through solar power
     solaronly = mgr.discharge_produced >= setpoint
@@ -571,6 +596,19 @@ async def _distribute_power(
     label = direction.label
 
     total_limit, total_weight, optimal = _compute_weights(devices, is_charge)
+
+    # Fresh WAKEUP commit: der Hysterese-Filter würde beim Direction-Change
+    # (z.B. CHARGE → DISCHARGE nach Cold-Start-Wake) den ersten Zyklus auf 0
+    # zurückhalten und das gerade hochgefahrene Gerät wieder abwürgen. Das
+    # erzeugt einen Abschalt-Transient (Rückstrom in den Akku), der als
+    # fälschliches CHARGE klassifiziert wird und Moduswechsel-Flattern triggert.
+    # Consume-and-reset: jedes Gerät das WAKEUP → CHARGE/DISCHARGE committet hat
+    # löst einen Hysterese-Reset aus, und das Flag wird gelöscht.
+    for d in devices:
+        if d.wakeup_committed:
+            _LOGGER.debug("%s: fresh WAKEUP commit on %s → reset hysteresis", label, d.name)
+            mgr.hysteresis.reset()
+            d.wakeup_committed = False
 
     # Mode-aware hysteresis: must run on BOTH charge and discharge paths so the
     # filter's internal `_last_direction` sees both sides and can detect CHARGE<->

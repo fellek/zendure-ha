@@ -86,6 +86,11 @@ class ZendureDevice(EntityDevice):
         self.power_flow_state: PowerFlowState = PowerFlowState.OFF
         self.wake_started_at: datetime = datetime.min
         self.wakeup_entered: datetime = datetime.min
+        # Consumable signal: True im Zyklus nach WAKEUP → CHARGE/DISCHARGE.
+        # Von `_distribute_power` gelesen + gelöscht, um die Hysterese zurück-
+        # zusetzen (sonst würgt der Direction-Change-Filter den frischen Wake
+        # auf setpoint=0 ab → Abschalt-Transient → Moduswechsel-Flattern).
+        self.wakeup_committed: bool = False
 
         self.create_entities()
         self.bypass = BypassRelay(self)
