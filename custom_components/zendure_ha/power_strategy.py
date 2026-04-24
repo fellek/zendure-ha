@@ -520,6 +520,7 @@ async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) 
             if d.power_flow_state == PowerFlowState.IDLE:
                 d.power_flow_state = PowerFlowState.WAKEUP
                 d.wakeup_entered = time
+                d.wake_started_at = time
             woken = True
             break  # ein Gerät pro Zyklus aufwecken
         if not woken:
@@ -567,6 +568,7 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int, time: datetim
             if d.power_flow_state == PowerFlowState.IDLE:
                 d.power_flow_state = PowerFlowState.WAKEUP
                 d.wakeup_entered = time
+                d.wake_started_at = time
             woken = True
             break  # ein Gerät pro Zyklus aufwecken
         if not woken:

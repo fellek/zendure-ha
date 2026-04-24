@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_components.zendure_ha.const import ManagerMode, PowerFlowState, SmartMode
+from custom_components.zendure_ha.const import DeviceState, ManagerMode, PowerFlowState, SmartMode
 from custom_components.zendure_ha.power_strategy import (
     Command,
     DeviceAssignment,
@@ -26,6 +26,8 @@ from custom_components.zendure_ha.power_strategy import (
     HysteresisFilter,
     _recover_wake_timeouts,
     apply_assignment,
+    distribute_charge,
+    distribute_discharge,
 )
 
 
@@ -158,6 +160,96 @@ def test_manual_mode_never_enters_rearm_loop(t0: datetime) -> None:
 # ---------------------------------------------------------------------------
 #  Sticky WAKEUP bug — regression fence.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+#  Cold-start wake_started_at bug — regression fence.
+# ---------------------------------------------------------------------------
+
+
+class _WakeDevice:
+    """Minimal device for cold-start wake tests.
+
+    Defined as a class (not SimpleNamespace) so it is hashable for the
+    `pass1_woken: set` inside `_wake_idle_devices`.
+    """
+
+    def __init__(self) -> None:
+        self.name = "sf2400"
+        self.power_flow_state = PowerFlowState.IDLE
+        self.state = DeviceState.ACTIVE
+        self.electricLevel = SimpleNamespace(asInt=50)
+        self.minSoc = SimpleNamespace(asNumber=10.0)
+        self.charge_limit = -2400
+        self.discharge_limit = 2400
+        self.wake_started_at = datetime.min
+        self.wakeup_entered = datetime.min
+        self.bypass = SimpleNamespace(is_active=False)
+
+    async def power_charge(self, power: int) -> int:
+        return power
+
+    async def power_discharge(self, power: int) -> int:
+        return power
+
+
+def _cold_start_mgr(d: _WakeDevice) -> SimpleNamespace:
+    return SimpleNamespace(
+        charge=[],
+        discharge=[],
+        discharge_limit=2400,
+        discharge_produced=0,
+        idle=[d],
+        idle_lvlmin=50,
+        idle_lvlmax=50,
+        power_flow_sensor=SimpleNamespace(update_value=lambda v: None),
+        hysteresis=HysteresisFilter(),
+        operation=ManagerMode.MATCHING,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cold_start_discharge_sets_wake_started_at(t0: datetime) -> None:
+    """Regression: cold-start discharge wake must set wake_started_at.
+
+    Before the fix, only wakeup_entered was set. _recover_wake_timeouts checks
+    wake_started_at, so time - datetime.min ≈ 63 Gs always exceeded WAKE_TIMEOUT,
+    reverting the device to IDLE on every cycle (~5 s) instead of after 15 s.
+    """
+    d = _WakeDevice()
+    await distribute_discharge(_cold_start_mgr(d), setpoint=200, time=t0)
+
+    assert d.power_flow_state == PowerFlowState.WAKEUP
+    assert d.wakeup_entered == t0
+    assert d.wake_started_at == t0, "wake_started_at not set — timeout fires immediately"
+
+
+@pytest.mark.asyncio
+async def test_cold_start_charge_sets_wake_started_at(t0: datetime) -> None:
+    """Regression: cold-start charge wake must set wake_started_at (symmetric fix)."""
+    d = _WakeDevice()
+    await distribute_charge(_cold_start_mgr(d), setpoint=-200, time=t0)
+
+    assert d.power_flow_state == PowerFlowState.WAKEUP
+    assert d.wakeup_entered == t0
+    assert d.wake_started_at == t0, "wake_started_at not set — timeout fires immediately"
+
+
+@pytest.mark.asyncio
+async def test_cold_start_timeout_survives_full_wake_cycle(t0: datetime) -> None:
+    """After a cold-start wake, _recover_wake_timeouts must not fire for WAKE_TIMEOUT seconds."""
+    d = _WakeDevice()
+    await distribute_discharge(_cold_start_mgr(d), setpoint=200, time=t0)
+
+    # 1 s later — must still be WAKEUP
+    recovered = _recover_wake_timeouts([d], t0 + timedelta(seconds=1))
+    assert recovered == []
+    assert d.power_flow_state == PowerFlowState.WAKEUP
+
+    # Just past WAKE_TIMEOUT — must revert
+    recovered = _recover_wake_timeouts([d], t0 + timedelta(seconds=SmartMode.WAKE_TIMEOUT + 1))
+    assert recovered == [d]
+    assert d.power_flow_state == PowerFlowState.IDLE
 
 
 def test_wake_timeout_recovers_stuck_device(t0: datetime) -> None:
