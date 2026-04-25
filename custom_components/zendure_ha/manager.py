@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time as _time
 import traceback
 from collections import deque
 from collections.abc import Callable
@@ -44,6 +45,12 @@ from .sensor import ZendureSensor
 SCAN_INTERVAL = timedelta(seconds=60)
 
 _LOGGER = logging.getLogger(__name__)
+_PERF = logging.getLogger(__name__ + ".perf")
+
+
+def _perf(tag: str, **kw) -> None:
+    if _PERF.isEnabledFor(logging.DEBUG):
+        _PERF.debug("PERF %s t=%.3f %s", tag, _time.monotonic(), " ".join(f"{k}={v}" for k, v in kw.items()))
 
 type ZendureConfigEntry = ConfigEntry[ZendureManager]
 
@@ -367,6 +374,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         except ValueError:
             return
 
+        _perf("P1_IN", p1=p1)
+
         # Get time & update simulation
         time = datetime.now()
         if ZendureManager.simulation:
@@ -419,6 +428,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""
+        _perf("DISPATCH_START", p1=p1)
         availableKwh = 0
         setpoint = p1
         power = 0
@@ -457,6 +467,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Update the power entities
         self.power.update_value(power)
         self.availableKwh.update_value(availableKwh)
+        _perf("ASSESS_DONE")
 
         # discharge_bypass accumulates the solar-only power produced by SOCFULL devices.
         # Subtract it from setpoint to avoid over-discharging from grid, but clamp so
@@ -547,6 +558,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.pwr_low = 0 if (delta := d.charge_start * 1.5 - pwr) >= 0 else self.pwr_low + int(-delta)
                 pwr = 0 if self.pwr_low < d.charge_optimal else pwr
 
+            _perf("CMD_ASSIGN", dev=d.name, pwr=pwr)
             setpoint -= await d.power_charge(pwr)
             dev_start += -1 if pwr != 0 and d.electricLevel.asInt > self.idle_lvlmin + 3 else 0
 
@@ -558,6 +570,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # but should not be started with more than pwr_offgrid if they are full
                 # if a offGrid device need to be started, the output power is set to 0 and it take all offGrid power from grid
                 start_pwr = max(50, min(80, abs(d.charge_limit) * 6 // 100))
+                _perf("CMD_ASSIGN", dev=d.name, pwr=-start_pwr)
                 await d.power_charge(-start_pwr - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid))
                 if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
                     break
@@ -613,6 +626,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.pwr_low = 0 if (delta := d.discharge_start * 1.5 - pwr) <= 0 else self.pwr_low + int(delta)
                 pwr = 0 if self.pwr_low > d.discharge_optimal else pwr
 
+            _perf("CMD_ASSIGN", dev=d.name, pwr=pwr)
             setpoint -= await d.power_discharge(pwr)
             dev_start += 1 if pwr != 0 and d.electricLevel.asInt + 3 < self.idle_lvlmax else 0
 
@@ -622,6 +636,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             for d in self.idle:
                 if d.state != DeviceState.SOCEMPTY:
                     start_pwr = max(50, min(80, d.discharge_limit * 6 // 100))
+                    _perf("CMD_ASSIGN", dev=d.name, pwr=start_pwr)
                     await d.power_discharge(start_pwr)
                     if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
                         break

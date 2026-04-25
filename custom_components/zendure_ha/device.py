@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time as _time
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -35,6 +36,13 @@ from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureRestoreSensor, ZendureSensor
 
 _LOGGER = logging.getLogger(__name__)
+_PERF = logging.getLogger(__name__ + ".perf")
+
+
+def _perf(tag: str, **kw) -> None:
+    if _PERF.isEnabledFor(logging.DEBUG):
+        _PERF.debug("PERF %s t=%.3f %s", tag, _time.monotonic(), " ".join(f"{k}={v}" for k, v in kw.items()))
+
 
 CONST_HEADER = {"content-type": "application/json; charset=UTF-8"}
 CONST_TIMEOUT = ClientTimeout(total=4)
@@ -304,6 +312,7 @@ class ZendureDevice(EntityDevice):
         command["deviceKey"] = self.deviceId
         command["timestamp"] = int(datetime.now().timestamp())
         self.mqttPublish(self.topic_function, command)
+        _perf("CMD_SENT", dev=self.snNumber, pwr="mqtt")
 
     async def mqttProperties(self, payload: Any) -> None:
         if self.lastseen == datetime.min:
@@ -753,8 +762,10 @@ class ZendureZenSdk(ZendureDevice):
     async def doCommand(self, command: Any) -> None:
         if self.connection.value != 0:
             await self.httpPost("properties/write", command)
+            _perf("CMD_SENT", dev=self.snNumber, pwr="http")
         else:
             self.mqttPublish(self.topic_write, command, self.mqtt)
+            _perf("CMD_SENT", dev=self.snNumber, pwr="mqtt")
 
     async def httpGet(self, url: str, key: str | None = None) -> dict[str, Any]:
         try:
