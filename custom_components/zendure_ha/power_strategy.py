@@ -45,18 +45,26 @@ Wakeup rules (inside _wake_idle_devices):
 from __future__ import annotations
 
 import logging
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from .const import DeviceState, ManagerMode, PowerFlowState, SmartMode
+from .const import AcMode, DeviceState, ManagerMode, PowerFlowState, SmartMode
 
 if TYPE_CHECKING:
     from .device import ZendureDevice
     from .manager import ZendureManager
 
 _LOGGER = logging.getLogger(__name__)
+_PERF = logging.getLogger(__name__ + ".perf")
+
+
+def _perf(tag: str, **kw: Any) -> None:
+    if _PERF.isEnabledFor(logging.DEBUG):
+        _PERF.debug("PERF %s t=%.3f %s", tag, _time.monotonic(),
+                    " ".join(f"{k}={v}" for k, v in kw.items()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +150,7 @@ async def apply_assignment(d: Any, assignment: DeviceAssignment) -> int:
     `power_charge(0)`.
     """
     cmd = assignment.command
+    _perf("CMD_ASSIGN", dev=d.name, pwr=assignment.power, cmd=cmd.name)
     if cmd == Command.CHARGE:
         return await d.power_charge(assignment.power)
     if cmd == Command.DISCHARGE:
@@ -337,7 +346,9 @@ def reset_power_state(mgr: ZendureManager) -> None:
 
 async def classify_and_dispatch(mgr: ZendureManager, p1: int, isFast: bool, time: datetime) -> None:
     """Classify devices into charge/discharge/idle and dispatch to the active mode."""
+    _perf("DISPATCH_START", p1=p1, isFast=isFast)
     snapshot = await _assess(mgr, p1, time)
+    _perf("ASSESS_DONE")
     _update_group_limits(mgr)
 
     mgr.power.update_value(snapshot.power)
@@ -540,6 +551,11 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int, time: datetim
         if d.state == DeviceState.SOCEMPTY:
             continue
         if d.electricLevel.asInt <= int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER:
+            continue
+        if d.acMode.asInt == AcMode.OUTPUT:
+            # Firmware has already switched to OUTPUT — a STOP_CHARGE would interrupt
+            # the in-progress CH→DIS transition and cause a 15-20s standby detour.
+            _LOGGER.debug("STOP_CHARGE skip %s: acMode=OUTPUT (transition in progress)", d.name)
             continue
         await apply_assignment(d, DeviceAssignment(Command.STOP_CHARGE))
 

@@ -117,6 +117,7 @@ class ZendureDevice(EntityDevice):
         self.socLimit = ZendureSensor(self, "socLimit", state=0)
         self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", FuseGroupType.as_select_dict(), None)
         self.acMode = ZendureSelect(self, "acMode", {1: "input", 2: "output"}, self.entityWrite, 1)
+        self.packState = ZendureSensor(self, "packState", state=0)
         self.electricLevel = ZendureSensor(self, "electricLevel", None, "%", "battery", "measurement")
         self.homeInput = ZendureSensor(self, "gridInputPower", None, "W", "power", "measurement")
         self.solarInput = ZendureSensor(self, "solarInputPower", None, "W", "power", "measurement", icon="mdi:solar-panel")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time as _time
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,13 @@ if TYPE_CHECKING:
     from .entity import EntityZendure
 
 _LOGGER = logging.getLogger(__name__)
+_PERF = logging.getLogger("custom_components.zendure_ha.power_strategy.perf")
+
+
+def _perf(tag: str, **kw: object) -> None:
+    if _PERF.isEnabledFor(logging.DEBUG):
+        _PERF.debug("PERF %s t=%.3f %s", tag, _time.monotonic(),
+                    " ".join(f"{k}={v}" for k, v in kw.items()))
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +41,7 @@ def mqtt_publish(device: ZendureDevice, topic: str, command: Any, client: Any | 
         client.publish(topic, payload)
     elif device.mqtt is not None:
         device.mqtt.publish(topic, payload)
+    _perf("CMD_SENT", dev=device.deviceId, transport="mqtt")
 
 
 def mqtt_invoke(device: ZendureDevice, command: Any) -> None:

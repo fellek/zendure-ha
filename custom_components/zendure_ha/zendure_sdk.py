@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time as _time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,13 @@ if TYPE_CHECKING:
     pass
 
 _LOGGER = logging.getLogger(__name__)
+_PERF = logging.getLogger("custom_components.zendure_ha.power_strategy.perf")
+
+
+def _perf(tag: str, **kw: object) -> None:
+    if _PERF.isEnabledFor(logging.DEBUG):
+        _PERF.debug("PERF %s t=%.3f %s", tag, _time.monotonic(),
+                    " ".join(f"{k}={v}" for k, v in kw.items()))
 
 
 class ZendureZenSdk(ZendureDevice):
@@ -77,11 +85,16 @@ class ZendureZenSdk(ZendureDevice):
     async def charge(self, power: int, _off: bool = False) -> int:
         """Set charge power."""
         _LOGGER.info("Power charge %s => %s", self.name, power)
+        # smartMode=1: Firmware soll gesendete Leistungswerte NICHT in den Flash schreiben (spart Schreibzyklen).
+        # smartMode=0: Normalmodus — Firmware persistiert die Werte.
+        # Nebeneffekt unklar: ob smartMode=0 bei power=0 selbst einen Standby auslöst oder ob
+        # der Standby allein durch outputLimit=0 + inputLimit=0 entsteht, ist nicht dokumentiert.
         await self.doCommand({"properties": {"smartMode": 0 if power == 0 else 1, "acMode": 1, "outputLimit": 0, "inputLimit": -power}})
         return power
 
     async def discharge(self, power: int) -> int:
         _LOGGER.info("Power discharge %s => %s", self.name, power)
+        # smartMode: siehe charge() — gleiche Semantik.
         await self.doCommand({"properties": {"smartMode": 0 if power == 0 else 1, "acMode": 2, "outputLimit": power, "inputLimit": 0}})
         return power
 
@@ -115,6 +128,7 @@ class ZendureZenSdk(ZendureDevice):
             command["sn"] = self.snNumber
             url = f"http://{self.ipAddress}/{url}"
             await self.session.post(url, json=command, headers=CONST_HEADER, timeout=CONST_TIMEOUT)
+            _perf("CMD_SENT", dev=self.snNumber, transport="http")
         except Exception as e:
             _LOGGER.error("%s for %s during httpPost: %s", type(e).__name__, self.name, e)
             self.lastseen = datetime.min

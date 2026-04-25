@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time as _time
 import traceback
 from collections import deque
 from collections.abc import Callable
@@ -46,6 +47,14 @@ from .power_port import GridSmartmeter, PowerPort
 SCAN_INTERVAL = timedelta(seconds=60)
 
 _LOGGER = logging.getLogger(__name__)
+_PERF = logging.getLogger(__name__ + ".perf")
+
+
+def _perf(tag: str, **kw: object) -> None:
+    if _PERF.isEnabledFor(logging.DEBUG):
+        _PERF.debug("PERF %s t=%.3f %s", tag, _time.monotonic(),
+                    " ".join(f"{k}={v}" for k, v in kw.items()))
+
 
 type ZendureConfigEntry = ConfigEntry[ZendureManager]
 
@@ -476,6 +485,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         try: p1 = int(self.p1_factor * float(new_state.state))
         except ValueError: return
 
+        _perf("P1_IN", p1=p1)
         # NEU: Zustand an Port delegieren
         self.grid_smartmeter.update_state(p1)
 

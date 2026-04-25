@@ -15,10 +15,10 @@ for backward compatibility.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from .const import DeviceState, PowerFlowState, SmartMode
+from .const import AcMode, DeviceState, PowerFlowState, SmartMode
 from .power_port import (
     BatteryPowerPort,
     ConnectorPowerPort,
@@ -89,56 +89,107 @@ class DevicePortBundle:
 
 
 class DevicePowerFlowStateMachine:
-    """Derives `power_flow_state` from `state` and battery port readings."""
+    """Derives `power_flow_state` from packState, acMode and battery port readings.
+
+    Entry point for callers: `classify()` \u2014 pure, no side effects, returns PowerFlowState.
+    `update()` calls `classify()` and handles state-transition bookkeeping.
+
+    Classification precedence (see docs/power-charge-discharge-transition-analysis-2026-04-22.md \u00a75):
+      packState=0             \u2192 IDLE  (Standby/Bypass, always)
+      packState=1, acMode=OUTPUT \u2192 IDLE  (CH\u2192DIS firmware transition; prevents redundant STOP_CHARGE)
+      packState=1, acMode=INPUT  \u2192 CHARGE or IDLE
+      packState=2 + guards    \u2192 DISCHARGE, WAKEUP or IDLE
+      Fallback (packState absent/unknown) \u2192 power-based legacy classification
+    """
 
     def __init__(self, device: ZendureDevice) -> None:
         self.device = device
 
-    def update(self) -> None:
+    def classify(self) -> PowerFlowState:
+        """Derive the current PowerFlowState from device signals. No side effects."""
         d = self.device
 
-        if d.power_flow_state == PowerFlowState.WAKEUP:
-            if abs(d.batteryPort.power) <= SmartMode.POWER_IDLE_OFFSET:
-                return
-            d.wakeup_entered = datetime.now()
-
-        prev_state = d.power_flow_state
-
         if d.state == DeviceState.OFFLINE:
-            d.power_flow_state = PowerFlowState.OFF
-            d.power_flow_sensor.update_value(d.power_flow_state.value)
-            return
+            return PowerFlowState.OFF
 
-        if d.state == DeviceState.SOCFULL:
-            d.power_flow_state = (
-                PowerFlowState.DISCHARGE if d.batteryPort.is_discharging else PowerFlowState.IDLE
-            )
-        elif d.state == DeviceState.SOCEMPTY:
-            d.power_flow_state = (
-                PowerFlowState.CHARGE if d.batteryPort.is_charging else PowerFlowState.IDLE
-            )
-        else:  # DeviceState.ACTIVE
+        pack_state = d.packState.asInt   # 0=Standby, 1=Charging, 2=Discharging
+        ac_mode    = d.acMode.asInt      # AcMode.INPUT=1, AcMode.OUTPUT=2
+
+        if pack_state == 0:
+            return PowerFlowState.IDLE
+
+        if pack_state == 1:
+            if ac_mode == AcMode.OUTPUT:
+                # Firmware has already switched direction; outputPackPower residual must not
+                # trigger a redundant STOP_CHARGE (the root cause of the 15-20s CH\u2192DIS delay).
+                return PowerFlowState.IDLE
+            # acMode=INPUT: normal charging path
             if d.batteryPort.is_charging:
-                d.power_flow_state = PowerFlowState.CHARGE
-            elif d.batteryPort.is_discharging:
-                d.power_flow_state = PowerFlowState.DISCHARGE
-            else:
-                d.power_flow_state = PowerFlowState.IDLE
+                return PowerFlowState.CHARGE
+            return PowerFlowState.IDLE  # startup ramp, power not yet above threshold
+
+        if pack_state == 2:
+            # Guards \u00a76.1, \u00a76.2, \u00a76.5
+            if d.state == DeviceState.SOCEMPTY:
+                return PowerFlowState.IDLE
+            if d.bypass.is_active:
+                return PowerFlowState.IDLE
+            if d.batteryPort.is_discharging:
+                if d.wake_started_at != datetime.min:
+                    d.wake_started_at = datetime.min  # WAKEUP complete; clear timer
+                return PowerFlowState.DISCHARGE
+            if d.state == DeviceState.SOCFULL:
+                return PowerFlowState.IDLE
+            # SOC-Guard \u00a76.1: prevent WAKEUP-loop near minSoC
+            soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
+            if d.electricLevel.asInt <= soc_limit:
+                return PowerFlowState.IDLE
+            # WAKEUP timeout: if firmware reports packState=2 but battery never delivers
+            # power within WAKE_TIMEOUT, classify as IDLE to allow re-command.
+            if d.wake_started_at == datetime.min:
+                d.wake_started_at = datetime.now()
+            if datetime.now() - d.wake_started_at > timedelta(seconds=SmartMode.WAKE_TIMEOUT):
+                return PowerFlowState.IDLE
+            return PowerFlowState.WAKEUP
+
+        # Fallback: packState value unknown / sensor not yet populated.
+        # Mirrors the pre-packState power-based logic for backward compatibility.
+        if d.state == DeviceState.SOCFULL:
+            return PowerFlowState.DISCHARGE if d.batteryPort.is_discharging else PowerFlowState.IDLE
+        if d.state == DeviceState.SOCEMPTY:
+            return PowerFlowState.CHARGE if d.batteryPort.is_charging else PowerFlowState.IDLE
+        if d.batteryPort.is_charging:
+            return PowerFlowState.CHARGE
+        if d.batteryPort.is_discharging:
+            return PowerFlowState.DISCHARGE
+        return PowerFlowState.IDLE
+
+    def update(self) -> None:
+        """Classify and apply state transitions with bookkeeping and sensor updates."""
+        d = self.device
+        prev_state = d.power_flow_state
+        d.power_flow_state = self.classify()
+
+        if d.power_flow_state == PowerFlowState.WAKEUP and prev_state != PowerFlowState.WAKEUP:
+            d.wakeup_entered = datetime.now()
 
         if d.power_flow_state != prev_state:
             _LOGGER.debug(
-                "PowerFlow %s: %s \u2192 %s (state=%s soc=%s)",
+                "PowerFlow %s: %s \u2192 %s (state=%s soc=%s pack=%s ac=%s)",
                 d.name,
                 prev_state.name,
                 d.power_flow_state.name,
                 d.state.name,
                 d.electricLevel.asInt,
+                d.packState.asInt,
+                d.acMode.asInt,
             )
             if prev_state == PowerFlowState.WAKEUP and d.power_flow_state in (
                 PowerFlowState.CHARGE,
                 PowerFlowState.DISCHARGE,
             ):
                 d.wakeup_committed = True
+
         d.power_flow_sensor.update_value(d.power_flow_state.value)
         d.inverterLoss.update_value(d.inverterLossPort.power)
 
