@@ -466,8 +466,9 @@ async def _dispatch_to_mode(mgr: ZendureManager, p1: int, setpoint: int, isFast:
         case ManagerMode.MATCHING:
             if setpoint < 0:
                 await distribute_charge(mgr, setpoint, time)
-            else:
+            elif setpoint > 0:
                 await distribute_discharge(mgr, setpoint, time)
+            # setpoint == 0: Bilanz ausgeglichen, kein Befehl — Geräte bleiben im aktuellen Zustand
 
         case ManagerMode.MATCHING_DISCHARGE:
             await distribute_discharge(mgr, max(0, setpoint), time)
@@ -518,14 +519,17 @@ async def distribute_charge(mgr: ZendureManager, setpoint: int, time: datetime) 
     # Analog zum Discharge-Pfad: echten Setpoint-Anteil senden, damit
     # batteryInput über die is_charging-Schwelle kommt und der IDLE-Loop
     # durchbrochen wird.
-    if not active_devices and mgr.idle and setpoint < -SmartMode.POWER_IDLE_OFFSET:
+    if not active_devices and mgr.idle and setpoint < -SmartMode.POWER_START:
         _LOGGER.debug("Charge cold-start: entered (idle=%d, setpoint=%s)", len(mgr.idle), setpoint)
         woken = False
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt):
+            if d.packState.asInt != 0:
+                _LOGGER.debug("Charge cold-start: skip %s [packState=%s, not standby]", d.name, d.packState.asInt)
+                continue
             if d.state == DeviceState.SOCFULL:
                 _LOGGER.debug("Charge cold-start: skip %s [SOCFULL]", d.name)
                 continue
-            wake_power = max(setpoint, d.charge_limit)  # beides negativ; charge_limit ist untere Schranke
+            wake_power = max(min(setpoint, -SmartMode.POWER_START), d.charge_limit)  # beides negativ; charge_limit ist untere Schranke
             _LOGGER.debug("Charge: cold-start wake %s => power_charge(%s)", d.name, wake_power)
             await d.power_charge(wake_power)
             if d.power_flow_state == PowerFlowState.IDLE:
@@ -562,10 +566,13 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int, time: datetim
     # Cold-start wakeup: kein aktives Discharge-Gerät, aber Bedarf vorhanden.
     # Echten Setpoint-Anteil senden (nicht nur 10W Keepalive), sonst bleibt
     # batteryOutput auf der is_discharging-Schwelle stehen und IDLE-Loop zementiert.
-    if not mgr.discharge and mgr.idle and setpoint > SmartMode.POWER_IDLE_OFFSET:
+    if not mgr.discharge and mgr.idle and setpoint > SmartMode.POWER_START:
         _LOGGER.debug("Discharge cold-start: entered (idle=%d, setpoint=%s)", len(mgr.idle), setpoint)
         woken = False
         for d in sorted(mgr.idle, key=lambda d: d.electricLevel.asInt, reverse=True):
+            if d.packState.asInt != 0 and d.state != DeviceState.SOCFULL:
+                _LOGGER.debug("Discharge cold-start: skip %s [packState=%s, not standby]", d.name, d.packState.asInt)
+                continue
             if d.state == DeviceState.SOCEMPTY:
                 _LOGGER.debug("Discharge cold-start: skip %s [SOCEMPTY]", d.name)
                 continue
@@ -574,8 +581,7 @@ async def distribute_discharge(mgr: ZendureManager, setpoint: int, time: datetim
                 _LOGGER.debug("Discharge cold-start: skip %s SoC=%s%% at minSoc limit (%s)",
                               d.name, d.electricLevel.asInt, min_soc_limit)
                 continue
-            # @todo review this condition, becaus its different to distribute_charge()
-            wake_power = min(setpoint, d.discharge_limit)
+            wake_power = min(max(setpoint, SmartMode.POWER_START), d.discharge_limit)
             _LOGGER.debug("Discharge: cold-start wake %s => power_discharge(%s)", d.name, wake_power)
             await d.power_discharge(wake_power)
             # Zustand auf WAKEUP heben, damit _recover_wake_timeouts bei
@@ -848,7 +854,9 @@ async def _wake_idle_devices(mgr: ZendureManager, dev_start: int, is_charge: boo
                 continue  # already waiting for battery to respond (MANUAL re-commands anyway)
             offgrid_load = d.offgridPort.power_consumption if d.offgridPort else 0
             if d.state == DeviceState.SOCFULL:
-                await d.power_charge(-offgrid_load)
+                if offgrid_load > SmartMode.POWER_START:
+                    await d.power_charge(-offgrid_load)
+                # sonst kein Befehl – gridOffPower enthält untrennbaren Eigenverbrauch (~13 W)
             elif d.state == DeviceState.SOCEMPTY:
                 pwr = min(dev_start, -SmartMode.POWER_START) - offgrid_load
                 if setpoint < 0:

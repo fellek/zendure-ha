@@ -18,14 +18,25 @@ class PowerPort(ABC):
     def __init__(self, name: str, is_input_only: bool = False):
         self.name = name
         self.is_input_only = is_input_only
+        self._cached_power: int | None = None
+
+    def invalidate(self) -> None:
+        """Cache leeren; wird vom DevicePortBundle zum Zyklusstart aufgerufen."""
+        self._cached_power = None
 
     @property
-    @abstractmethod
     def power(self) -> int:
         """
         Gibt die aktuelle Leistung in Watt zurück.
         Konvention: + = Verbrauch, - = Erzeugung.
+        Innerhalb eines Zyklus gecacht; invalidate() leert den Cache.
         """
+        if self._cached_power is None:
+            self._cached_power = self._compute_power()
+        return self._cached_power
+
+    @abstractmethod
+    def _compute_power(self) -> int:
         pass
 
 
@@ -39,9 +50,9 @@ class GridSmartmeter(PowerPort):
     def update_state(self, power: int):
         """Wird vom Manager aufgerufen, wenn sich der P1-Zähler ändert."""
         self._power = power
+        self.invalidate()
 
-    @property
-    def power(self) -> int:
+    def _compute_power(self) -> int:
         # P1 Positiv = Netzbezug (Verbrauch), P1 Negativ = Einspeisung (Erzeugung)
         return self._power
 
@@ -53,30 +64,29 @@ class ConnectorPowerPort(PowerPort):
         super().__init__(name=f"AC Grid ({device.name})", is_input_only=False)
         self.device = device
 
-    @property
-    def power(self) -> int:
+    def _compute_power(self) -> int:
         """Positiv = Einspeisung (outputHomePower), Negativ = Netzbezug (gridInputPower)."""
         return self.device.homeOutput.asInt - self.device.homeInput.asInt
 
     @property
     def power_consumption(self) -> int:
-        """Power drawn from grid (gridInputPower), always >= 0."""
-        return self.device.homeInput.asInt
+        """Net power drawn from grid (always >= 0)."""
+        return max(0, -self.power)
 
     @property
     def power_production(self) -> int:
-        """Power fed into home (outputHomePower), always >= 0."""
-        return self.device.homeOutput.asInt
+        """Net power fed into home (always >= 0)."""
+        return max(0, self.power)
 
     @property
     def is_consuming(self) -> bool:
         """Device is currently drawing from grid."""
-        return self.device.homeInput.asInt > 0
+        return self.power < 0
 
     @property
     def is_producing(self) -> bool:
         """Device is currently feeding into home."""
-        return self.device.homeOutput.asInt > 0
+        return self.power > 0
 
 
 class BatteryPowerPort(PowerPort):
@@ -86,30 +96,29 @@ class BatteryPowerPort(PowerPort):
         super().__init__(name=f"Battery ({device.name})", is_input_only=False)
         self.device = device
 
-    @property
-    def power(self) -> int:
+    def _compute_power(self) -> int:
         """Positive = discharging (battery -> system), negative = charging (system -> battery)."""
         return self.device.batteryOutput.asInt - self.device.batteryInput.asInt
 
     @property
     def charge_power(self) -> int:
-        """Raw charge power (always >= 0)."""
-        return self.device.batteryInput.asInt
+        """Net charge power (always >= 0)."""
+        return max(0, -self.power)
 
     @property
     def discharge_power(self) -> int:
-        """Raw discharge power (always >= 0)."""
-        return self.device.batteryOutput.asInt
+        """Net discharge power (always >= 0)."""
+        return max(0, self.power)
 
     @property
     def is_charging(self) -> bool:
         """Battery is currently charging."""
-        return self.device.batteryInput.asInt > 0
+        return self.power < 0
 
     @property
     def is_discharging(self) -> bool:
         """Battery is actively discharging (above idle offset)."""
-        return self.device.batteryOutput.asInt > SmartMode.POWER_IDLE_OFFSET
+        return self.power > SmartMode.POWER_IDLE_OFFSET
 
 
 class OffGridPowerPort(PowerPort):
@@ -119,20 +128,19 @@ class OffGridPowerPort(PowerPort):
         super().__init__(name=f"Offgrid ({device.name})", is_input_only=False)
         self.device = device
 
-    @property
-    def power(self) -> int:
+    def _compute_power(self) -> int:
         """Offgrid netto: positiv = Verbrauch, negativ = Einspeisung (externer Akku/MWR)."""
         return self.device.pwr_offgrid
 
     @property
     def power_consumption(self) -> int:
         """Reine Last an Offgrid-Steckdose (>= 0)."""
-        return max(0, self.device.pwr_offgrid)
+        return max(0, self.power)
 
     @property
     def power_production(self) -> int:
         """Einspeisung über Offgrid (>= 0). Externer Akku oder Mikrowechselrichter."""
-        return max(0, -self.device.pwr_offgrid)
+        return max(0, -self.power)
 
 
 class DcSolarPowerPort(PowerPort):
@@ -143,9 +151,7 @@ class DcSolarPowerPort(PowerPort):
         self.device = device
         self._sensors = sensors
 
-    @property
-    def power(self) -> int:
-
+    def _compute_power(self) -> int:
         return self.total_solar_power
 
     @property
@@ -175,8 +181,7 @@ class InverterLossPowerPort(PowerPort):
         self._model_active_w = model_active_w
         self._model_standby_w = model_standby_w
 
-    @property
-    def power(self) -> int:
+    def _compute_power(self) -> int:
         """Geschätzter Selbstverbrauch in Watt (immer >= 0)."""
         measured = self._from_energy_balance()
         if measured is not None:

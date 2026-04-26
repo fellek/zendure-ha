@@ -235,10 +235,95 @@ def compare(before: Metrics, after: Metrics) -> str:
         "=== VERGLEICH: vor → nach ===",
         f"  Zykluslatenz (mean):   {_fmt(mean(before.cycle_latency) if before.cycle_latency else None)} → {_fmt(mean(after.cycle_latency) if after.cycle_latency else None)}  Δ={delta(before.cycle_latency, after.cycle_latency)}",
         f"  Strategie-Dauer (mean):{_fmt(mean(before.strategy_duration) if before.strategy_duration else None)} → {_fmt(mean(after.strategy_duration) if after.strategy_duration else None)}  Δ={delta(before.strategy_duration, after.strategy_duration)}",
-        f"  Befehle/Min:           {before.cmd_per_minute:.2f if before.cmd_per_minute else 'n/a'} → {after.cmd_per_minute:.2f if after.cmd_per_minute else 'n/a'}",
+        f"  Befehle/Min:           {f'{before.cmd_per_minute:.2f}' if before.cmd_per_minute else 'n/a'} → {f'{after.cmd_per_minute:.2f}' if after.cmd_per_minute else 'n/a'}",
         f"  Richtungswechsel:      {before.direction_flips} → {after.direction_flips}",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# cProfile .prof comparison
+# ---------------------------------------------------------------------------
+
+def _load_prof(path: str, filter_str: str = "zendure_ha") -> dict[str, tuple[int, float, float]]:
+    """Lade .prof-Datei, gib {funcname: (ncalls, tottime, cumtime)} zurück.
+
+    Nur Funktionen deren Quelldatei `filter_str` enthält werden behalten.
+    Bei Namenskollisionen (gleicher Funktionsname in verschiedenen Dateien)
+    wird der vollständige Schlüssel `datei::func` verwendet.
+    """
+    import io
+    import pstats
+
+    s = pstats.Stats(path, stream=io.StringIO())
+    result: dict[str, tuple[int, float, float]] = {}
+    for (filename, _lineno, funcname), (_pcalls, ncalls, tt, ct, _callers) in s.stats.items():
+        if filter_str not in filename:
+            continue
+        key = funcname
+        if key in result:
+            short = filename.split("/")[-1].replace(".py", "")
+            key = f"{short}::{funcname}"
+        result[key] = (ncalls, tt, ct)
+    return result
+
+
+def compare_prof(path_before: str, path_after: str) -> None:
+    """Vergleiche zwei cProfile-.prof-Dateien und gib tabellarischen Diff aus."""
+    import io
+    import pstats
+
+    def total_time(path: str) -> float:
+        s = pstats.Stats(path, stream=io.StringIO())
+        return sum(tt for (_f, _l, _n), (_p, _nc, tt, _ct, _ca) in s.stats.items())
+
+    before = _load_prof(path_before)
+    after = _load_prof(path_after)
+    tt_before = total_time(path_before)
+    tt_after = total_time(path_after)
+
+    delta_total = (tt_after - tt_before) / tt_before * 100 if tt_before else float("nan")
+    print("=== cProfile-Vergleich ===")
+    print(f"Gesamtlaufzeit:  before={tt_before:.2f}s  after={tt_after:.2f}s  Δ={delta_total:+.1f}%")
+    print()
+
+    common = set(before) & set(after)
+    only_before = set(before) - set(after)
+    only_after = set(after) - set(before)
+
+    # Zeilen für gemeinsame Funktionen
+    rows: list[tuple[float, str, int, float, float, int, float, float]] = []
+    for name in common:
+        nc_b, tt_b, ct_b = before[name]
+        nc_a, tt_a, ct_a = after[name]
+        delta_ct = (ct_a - ct_b) / ct_b * 100 if ct_b else float("nan")
+        ppc_b = ct_b / nc_b * 1000 if nc_b else 0.0
+        ppc_a = ct_a / nc_a * 1000 if nc_a else 0.0
+        rows.append((abs(ct_a - ct_b), name, nc_b, ct_b, ct_a, nc_a, ppc_b, ppc_a))
+
+    rows.sort(reverse=True)
+
+    hdr = f"  {'Funktion':<40} {'cum_b':>7} {'cum_a':>7} {'Δ%':>7}  {'calls_b':>7} {'calls_a':>7}  {'ms/call_b':>9} {'ms/call_a':>9}"
+    print("Gemeinsame Funktionen (sortiert nach Δ cumtime):")
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+    for _abs_d, name, nc_b, ct_b, ct_a, nc_a, ppc_b, ppc_a in rows:
+        delta_ct = (ct_a - ct_b) / ct_b * 100 if ct_b else float("nan")
+        print(f"  {name:<40} {ct_b:>7.3f} {ct_a:>7.3f} {delta_ct:>+7.1f}%  {nc_b:>7} {nc_a:>7}  {ppc_b:>9.2f} {ppc_a:>9.2f}")
+
+    if only_before:
+        print()
+        print("Nur in 'before' (entfernte / umbenannte Funktionen):")
+        for name in sorted(only_before):
+            nc, tt, ct = before[name]
+            print(f"  {name:<40} {ct:>7.3f}s  {nc} Aufrufe  {ct/nc*1000:.2f}ms/call")
+
+    if only_after:
+        print()
+        print("Nur in 'after' (neue / umbenannte Funktionen):")
+        for name in sorted(only_after):
+            nc, tt, ct = after[name]
+            print(f"  {name:<40} {ct:>7.3f}s  {nc} Aufrufe  {ct/nc*1000:.2f}ms/call")
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +334,14 @@ def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
+
+    # --prof before.prof after.prof
+    if sys.argv[1] == "--prof":
+        if len(sys.argv) != 4:
+            print("Verwendung: analyze_perf_log.py --prof before.prof after.prof")
+            sys.exit(1)
+        compare_prof(sys.argv[2], sys.argv[3])
+        return
 
     files = sys.argv[1:]
     results: list[tuple[str, Metrics]] = []

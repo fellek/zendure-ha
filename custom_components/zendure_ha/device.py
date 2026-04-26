@@ -341,16 +341,15 @@ class ZendureDevice(EntityDevice):
 
     def update_power_flow_state(self) -> None:
         """Delegiert an den `DevicePowerFlowStateMachine`-Kollaborator."""
+        self.port_bundle.invalidate_all()
         self.state_machine.update()
 
     @property
     def pwr_produced(self) -> int:
         """Power produced internally (negative = generation). Computed from ports."""
-        solar = self.solarPort.total_solar_power if self.solarPort else 0
+        solar        = self.solarPort.power if self.solarPort else 0
         offgrid_feed = self.offgridPort.power_production if self.offgridPort else 0
-        return min(0,
-                   self.batteryPort.discharge_power + self.connectorPort.power_consumption
-                   - self.batteryPort.charge_power - self.connectorPort.power_production - solar - offgrid_feed)
+        return min(0, self.batteryPort.power - self.connectorPort.power - solar - offgrid_feed)
 
 
 class ZendureLegacy(ZendureDevice):

@@ -35,8 +35,10 @@ class ZendureSelect(EntityZendure, SelectEntity):
         self._attr_options = list(options.values())
         if current:
             self._attr_current_option = options[current]
+            self._current_key: Any = current
         else:
             self._attr_current_option = self._attr_options[0]
+            self._current_key: Any = next(iter(options), None)
         self.onchanged = onchanged
         self.add([self])
 
@@ -46,12 +48,14 @@ class ZendureSelect(EntityZendure, SelectEntity):
         self._attr_options = list(options.values())
         if self._attr_current_option not in self._attr_options:
             self._attr_current_option = self._attr_options[0]
+        self._current_key = next((k for k, v in options.items() if v == self._attr_current_option), None)
         if self.hass and self.hass.loop.is_running():
             self.async_write_ha_state()
 
     def setList(self, options: list[str]) -> None:
         """Set the options for the select entity."""
         self._options = None
+        self._current_key = None
         self._attr_options = options
         if self._attr_current_option not in self._attr_options:
             self._attr_current_option = self._attr_options[0]
@@ -63,12 +67,12 @@ class ZendureSelect(EntityZendure, SelectEntity):
             if self._options is None or value not in self._options:
                 return False
 
-            if self._options is not None:
-                new_value = self._options[value]
-                if new_value != self._attr_current_option:
-                    self._attr_current_option = new_value
-                    if self.hass and self.hass.loop.is_running():
-                        self.schedule_update_ha_state()
+            new_value = self._options[value]
+            self._current_key = value
+            if new_value != self._attr_current_option:
+                self._attr_current_option = new_value
+                if self.hass and self.hass.loop.is_running():
+                    self.schedule_update_ha_state()
 
         except Exception as err:
             _LOGGER.error("Error %s setting state: %s => %s", err, self._attr_unique_id, value)
@@ -77,6 +81,7 @@ class ZendureSelect(EntityZendure, SelectEntity):
     async def async_select_option(self, option: str) -> None:
         """Update the current selected option."""
         self._attr_current_option = option
+        self._current_key = next((k for k, v in self._options.items() if v == option), None) if self._options else None
         value = self.value
         if self.onchanged:
             if inspect.iscoroutinefunction(self.onchanged):
@@ -87,11 +92,12 @@ class ZendureSelect(EntityZendure, SelectEntity):
 
     @property
     def value(self) -> Any:
-        if self._options is not None:
-            for key, value in self._options.items():
-                if value == self._attr_current_option:
-                    return key
-        return None
+        return self._current_key
+
+    @property
+    def asInt(self) -> int:
+        v = self.value
+        return int(v) if isinstance(v, (int, float)) else 0
 
 
 class ZendureRestoreSelect(ZendureSelect, RestoreEntity):
@@ -106,8 +112,10 @@ class ZendureRestoreSelect(ZendureSelect, RestoreEntity):
         await super().async_added_to_hass()
         if state := await self.async_get_last_state():
             self._attr_current_option = state.state
+            self._current_key = next((k for k, v in self._options.items() if v == state.state), None) if self._options else None
         else:
             self._attr_current_option = self._attr_options[0]
+            self._current_key = next(iter(self._options), None) if self._options else None
 
         # do the onchanged callback
         if self.onchanged:

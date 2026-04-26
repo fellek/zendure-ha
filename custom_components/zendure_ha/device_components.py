@@ -87,6 +87,11 @@ class DevicePortBundle:
         self.inverter_loss = InverterLossPowerPort(d)
         self.all.append(self.inverter_loss)
 
+    def invalidate_all(self) -> None:
+        """Leert den Power-Cache aller Ports zum Zyklusstart."""
+        for port in self.all:
+            port.invalidate()
+
 
 class DevicePowerFlowStateMachine:
     """Derives `power_flow_state` from packState, acMode and battery port readings.
@@ -132,14 +137,15 @@ class DevicePowerFlowStateMachine:
             # Guards \u00a76.1, \u00a76.2, \u00a76.5
             if d.state == DeviceState.SOCEMPTY:
                 return PowerFlowState.IDLE
-            if d.bypass.is_active:
-                return PowerFlowState.IDLE
+            # \u00a76.2: is_discharging before bypass \u2014 battery physically delivering power wins
             if d.batteryPort.is_discharging:
                 if d.wake_started_at != datetime.min:
                     d.wake_started_at = datetime.min  # WAKEUP complete; clear timer
                 return PowerFlowState.DISCHARGE
-            if d.state == DeviceState.SOCFULL:
+            if d.bypass.is_active:
                 return PowerFlowState.IDLE
+            if d.state == DeviceState.SOCFULL:
+                return self._socfull_idle_or_wakeup()
             # SOC-Guard \u00a76.1: prevent WAKEUP-loop near minSoC
             soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
             if d.electricLevel.asInt <= soc_limit:
@@ -155,13 +161,31 @@ class DevicePowerFlowStateMachine:
         # Fallback: packState value unknown / sensor not yet populated.
         # Mirrors the pre-packState power-based logic for backward compatibility.
         if d.state == DeviceState.SOCFULL:
-            return PowerFlowState.DISCHARGE if d.batteryPort.is_discharging else PowerFlowState.IDLE
+            if d.batteryPort.is_discharging:
+                return PowerFlowState.DISCHARGE
+            return self._socfull_idle_or_wakeup()
         if d.state == DeviceState.SOCEMPTY:
             return PowerFlowState.CHARGE if d.batteryPort.is_charging else PowerFlowState.IDLE
         if d.batteryPort.is_charging:
             return PowerFlowState.CHARGE
         if d.batteryPort.is_discharging:
             return PowerFlowState.DISCHARGE
+        return PowerFlowState.IDLE
+
+    def _socfull_idle_or_wakeup(self) -> PowerFlowState:
+        """WAKEUP if a discharge command was recently sent (wake_started_at set), else IDLE.
+
+        Used for SOCFULL devices that cannot discharge via the normal WAKEUP path because
+        packState=2 + SOCFULL would otherwise always return IDLE, preventing the discharge
+        cold-start from ever triggering a response.
+        """
+        d = self.device
+        soc_limit = int(d.minSoc.asNumber) + SmartMode.DISCHARGE_SOC_BUFFER
+        if (d.electricLevel.asInt > soc_limit
+                and d.wake_started_at != datetime.min
+                and datetime.now() - d.wake_started_at
+                    <= timedelta(seconds=SmartMode.WAKE_TIMEOUT)):
+            return PowerFlowState.WAKEUP
         return PowerFlowState.IDLE
 
     def update(self) -> None:
