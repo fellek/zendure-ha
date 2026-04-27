@@ -12,7 +12,7 @@ from .sensor import ZendureSensor
 if TYPE_CHECKING:
     from .device import ZendureDevice
 
-_MODES: dict[int, str] = {0: "off", 2: "reverse", 3: "input"}
+_MODES: dict[int, str] = {0: "off", 1: "active", 2: "reverse", 3: "input"}
 
 
 class BypassRelay(ZendureBinarySensor):
@@ -25,7 +25,7 @@ class BypassRelay(ZendureBinarySensor):
         super().__init__(device, "pass")          # registriert unter entities["pass"]
         self._raw: int = 0
         self._mode = ZendureSensor(device, "pass_mode")
-        self._mode._attr_options = ["off", "reverse", "input"]
+        self._mode._attr_options = ["off", "active", "reverse", "input"]
         self._mode._attr_device_class = SensorDeviceClass.ENUM
 
     def update_value(self, value: Any) -> bool:

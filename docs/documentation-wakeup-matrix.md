@@ -146,17 +146,59 @@ Die Hysterese interagiert an **zwei Stellen** mit dem Wakeup:
 
 ## 8. Sunset-Bug — Detailablauf (SF2400 AC, 2026-04-26 19:26)
 
-Konkrete Log-Sequenz die alle Probleme aus §7 illustriert:
+### Analyse 
 
-| Zeit | Ereignis | Ursache |
-|------|----------|---------|
-| 19:26:02–07 | Dispatch: setpoint 32/38 W → Filter: < 50 W → 0 → kein Befehl | `_last_direction` bleibt CHARGE (veraltet) |
-| **19:26:12** | Cold-start: `power_discharge(64)` — bypasses Filter ✓ | Filter sieht aber CHARGE→DISCHARGE → **Cooldown 20 s** bis 19:26:32 |
-| 19:26:15 | MQTT: packState=0 → `WAKEUP → IDLE` | SF2400 AC Hardware: meldet kurz Standby während DC-Link hochfährt |
-| 19:26:16 | MQTT: acMode=2, outputLimit=64, smartMode=1 — Befehl akzeptiert | — |
-| 19:26:20 | MQTT: packState=2, is_discharging → `IDLE → DISCHARGE` | `wakeup_committed` bleibt false (prev=IDLE, nicht WAKEUP) |
-| **19:26:24** | Filter: Cooldown noch aktiv (12 s < 20 s) → 0 → **`power_discharge(0)`** | Problem 1+2: kein Reset, Filter stoppt laufendes Gerät |
-| 19:26:27 | `DISCHARGE → WAKEUP` — AC-Ausgang aus, DC-Link aktiv | — |
-| 19:26:30–40 | **28 W Inverter-Eigenverbrauch** aus Batterie, kein Netzausgang | Inverter fährt herunter (outputPackPower=28, acStatus=0) |
-| 19:26:42 | Zweiter Cold-start: `power_discharge(69)` — Cooldown abgelaufen ✓ | 30 s nach Cooldown-Ende → Filter passiert normal |
-| 19:26:54 | Stabiler Betrieb 75–86 W | — |
+Konkrete Log-Sequenz die alle Probleme aus §7 illustriert:
+Erste Zeile: alle Werte, danach nur Änderungen.
+
+Relevante Felder: `packState` · `acMode` · `acStatus` · `outputLimit` · `outputHomePower` · `outputPackPower` · `smartMode` · `pack.state` · `pack.batcur`
+
+---
+
+| Zeit | Ereignis | MQTT-Werte (erste Zeile: alle; dann: Δ Änderungen) |
+|------|----------|----------------------------------------------------|
+| 19:26:00 | Erste MQTT-Meldung (msg 64683) | `packState=0` `acMode=1` `acStatus=0` `outputLimit=0` `outputHomePower=0` `outputPackPower=0` `smartMode=0` · `pack.state=0` `pack.batcur=0` |
+| 19:26:02 | Dispatch: classify=IDLE, setpoint=32W → Filter: 32<50W → 0 → kein Befehl | — |
+| 19:26:05 | MQTT (msg 64685) | Keine Änderung |
+| 19:26:07 | Dispatch: classify=IDLE, setpoint=38W → Filter: 38<50W → 0 → kein Befehl | — |
+| 19:26:10 | MQTT (msg 64687) | Keine Änderung |
+| **19:26:12** | **Cold-Start: `power_discharge(64)` gesendet. Hysterese: CHARGE→DISCHARGE → Cooldown 20s (bis 19:26:32). `power_flow_state=WAKEUP`** | — |
+| 19:26:15 | MQTT (msg 64688, packNum only) + **State: `WAKEUP → IDLE`** (pack=0, ac=1) | — |
+| 19:26:16 | MQTT (msg 64689) — Gerät akzeptiert Befehl | Δ `acMode=2` `outputLimit=64` `smartMode=1` |
+| 19:26:18 | Dispatch: classify=IDLE (packState noch 0!), setpoint=11W → Filter: 11<50W → 0 → kein Befehl | — |
+| **19:26:20** | MQTT (msg 64691) + **State: `IDLE → DISCHARGE`** (wakeup_committed bleibt False!) | Δ `packState=2` `acStatus=1` `outputHomePower=63` `outputPackPower=0` `smartMode=1` · `pack.state=2` `pack.batcur=65525` |
+| **19:26:24** | **Dispatch: classify=DISCHARGE(feedIn=64), setpoint=59W → Filter: Cooldown aktiv (noch 8s) → 0 → `power_discharge(0)` gesendet ← BUG** | — |
+| 19:26:25 | MQTT (msg 64693) — kurz höhere Leistung vor Stopp | Δ `pack.batcur=65515` `pack.power=104` |
+| **19:26:27** | **State: `DISCHARGE → WAKEUP`** — Gerät stoppt AC-Ausgang | — |
+| **19:26:30** | **MQTT (msg 64695) — 28W Inverter-Eigenverbrauch** | Δ `outputHomePower=0` `outputPackPower=28` `acStatus=0` `outputLimit=0` `smartMode=0` · `pack.batcur=65534` `pack.power=9` |
+| 19:26:32–37 | Dispatches: classify=WAKEUP (idle=1), cold-start: skip weil packState=2 → kein Befehl | — |
+| 19:26:35 | MQTT (msg 64697) | Δ `pack.power=4` `pack.batcur=65535` |
+| 19:26:40 | MQTT (msg 64699) — DC-Link schaltet ab | Δ `outputPackPower=0` `dcStatus=0` |
+| **19:26:42** | **State: `WAKEUP → IDLE`** (packState→0). Dispatch: classify=IDLE, setpoint=69W → **Cold-Start**, `power_discharge(69)` | — |
+| 19:26:45 | MQTT (msg 64701) — zweiter Anlauf, Befehl akzeptiert | Δ `packState=0` `outputLimit=69` `smartMode=1` · `pack.state=0` `pack.batcur=0` |
+| **19:26:47** | **State: `WAKEUP → IDLE`** (packState=0 nochmals). Dispatch: cold-start, `power_discharge(76)` | — |
+| **19:26:50** | MQTT (msg 64703) + **State: `IDLE → DISCHARGE`** | Δ `packState=2` `acStatus=1` `outputLimit=76` `outputHomePower=76` · `pack.state=2` `pack.batcur=65517` |
+| **19:26:54** | **Dispatch: classify=DISCHARGE(feedIn=75), setpoint=76W → Filter: Cooldown abgelaufen (42s nach 19:26:12) → passiert → no action (Gerät liefert bereits 75W)** | — |
+| 19:27:00+ | Stabiler Betrieb, Feinregelung 75–86W | — |
+
+---
+
+**Auffälligkeiten in den Rohdaten:**
+
+- `pack.batcur=65525` ≈ −11 (16-bit-Komplement, Entladestrom in ~0.1A-Einheit), steigt mit der Last
+- Das Gerät meldet nach 19:26:16 schon `acMode=2, outputLimit=64` (Befehl angekommen), aber `packState` bleibt noch bis 19:26:20 auf 0 — das ist die SF2400 AC Hardware-Eigenheit die den WAKEUP→IDLE→DISCHARGE-Pfad erzwingt
+- `outputPackPower=28` bei `outputHomePower=0` und `acStatus=0` (19:26:30–40) ist der reine Wechselrichter-Eigenverbrauch — keine Nutzleistung
+---
+### Fazit
+Mqtt-Werte `acMode=2` und `outputLimit=64` sind die Bestätigung der Firmware, dass die gewünschten Werte angenommen sind und verarbeitet werden. 
+Diese Information soll in der Wakeup Routine berücksichtigt werden. 
+Wenn Lade-/Entladerichtung bestätigt sind, ist der `packState` und die Leistung am Akku mit verzögerung zu erwarten.
+Ein STOP darf in dieser Situation nicht gesendet werden.
+
+## Prüfen
+1. Welche Wakeup und Cold-Wakeup-Pfade doppeln oder überlagern sich?
+2. Welche Bedingungen sind doppelt?
+3. Wo können Aufgaben zusammengefasst werden?
+
+## Ergänzen
+1. POWER_START bekommt in https://github.com/Zendure/Zendure-HA/pull/1288/changes/f787a6a38c3bd23e07bcad7c7e64cd3859b9579e zusätzlich eine randomisierte Zahl zwischen 0-10 addiert.   

@@ -4,22 +4,30 @@ The state machine is exercised without instantiating a real `ZendureDevice`:
 we hand it a lightweight stand-in that exposes only the attributes the
 state machine reads or writes.  That keeps these tests free of HA imports.
 
-Classification matrix (see docs/power-charge-discharge-transition-analysis-2026-04-22.md §5):
+Classification matrix:
 
-  packState=0                                  → IDLE  (Standby / Bypass)
-  packState=1, acMode=OUTPUT                   → IDLE  (CH→DIS firmware transition)
-  packState=1, acMode=INPUT, is_charging       → CHARGE
-  packState=1, acMode=INPUT, not charging      → IDLE  (startup ramp)
-  packState=2, SOCEMPTY                        → IDLE  (guard §6.1)
-  packState=2, bypass active                   → IDLE  (guard §6.2)
-  packState=2, SOCFULL, is_discharging         → DISCHARGE
-  packState=2, SOCFULL, not discharging        → IDLE
-  packState=2, SOC <= minSoc+buffer            → IDLE  (SOC-guard §6.1)
-  packState=2, is_discharging                  → DISCHARGE
-  packState=2, wake_started_at expired         → IDLE  (timeout §6 self-heal)
-  packState=2, no discharge, guards pass       → WAKEUP
-  packState=other / not set                    → fallback: power-based classification
-  OFFLINE                                      → OFF   (always)
+  packState=0, wakeup_cmd=None             → IDLE  (Standby)
+  packState=0, wakeup_cmd set              → WAKEUP (Sunset-Bug fix)
+  packState=1, acMode=OUTPUT               → IDLE  (CH→DIS firmware transition)
+  packState=1, acMode=INPUT, is_charging   → CHARGE
+  packState=1, acMode=INPUT, not charging  → IDLE  (startup ramp, no cmd)
+  packState=1, acMode=INPUT, not charging, cmd → WAKEUP (startup ramp, cmd pending)
+  packState=2, SOCEMPTY                    → IDLE  (guard)
+  packState=2, bypass active               → IDLE  (guard)
+  packState=2, SOCFULL, is_discharging     → DISCHARGE
+  packState=2, SOCFULL, not discharging    → IDLE
+  packState=2, SOC <= minSoc+buffer        → IDLE  (SOC-guard)
+  packState=2, is_discharging              → DISCHARGE
+  packState=2, wakeup_cmd=None             → IDLE
+  packState=2, wakeup_cmd set, guards pass → WAKEUP
+  packState=other / not set                → fallback: power-based classification
+  OFFLINE                                  → OFF   (always)
+
+WakeupCommand lifecycle (managed by update()):
+  STOP echo (acMode==dir, limit==0)        → clears wakeup_cmd
+  Confirm echo (acMode==dir, limit>=START) → sets cmd.confirmed=True
+  Timeout (elapsed > WAKE_TIMEOUT)         → clears wakeup_cmd
+  WAKEUP → CHARGE/DISCHARGE               → clears wakeup_cmd, sets wakeup_just_completed
 """
 
 from __future__ import annotations
@@ -29,7 +37,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from custom_components.zendure_ha.const import AcMode, DeviceState, PowerFlowState, SmartMode
+from custom_components.zendure_ha.const import AcMode, DeviceState, PowerFlowState, SmartMode, WakeupCommand
 from custom_components.zendure_ha.device_components import DevicePowerFlowStateMachine
 
 from .conftest import FakeBypassRelay, FakeSensor
@@ -73,15 +81,31 @@ class FakeSMDevice:
         default_factory=lambda: FakeSensor(value=AcMode.INPUT)
     )
     bypass: FakeBypassRelay = field(default_factory=FakeBypassRelay)
-    wakeup_entered: datetime = datetime.min
-    wake_started_at: datetime = datetime.min
-    wakeup_committed: bool = False
+    wakeup_cmd: WakeupCommand | None = None
+    wakeup_just_completed: bool = False
     batteryPort: FakeBatteryPort = field(default_factory=FakeBatteryPort)   # noqa: N815
     inverterLossPort: FakeInverterLossPort = field(                          # noqa: N815
         default_factory=FakeInverterLossPort
     )
     power_flow_sensor: FakeSensor = field(default_factory=FakeSensor)
     inverterLoss: FakeSensor = field(default_factory=FakeSensor)             # noqa: N815
+    limitOutput: FakeSensor = field(default_factory=FakeSensor)              # noqa: N815
+    limitInput: FakeSensor = field(default_factory=FakeSensor)               # noqa: N815
+
+
+def _cmd(
+    direction: int = AcMode.OUTPUT,
+    expected_pack_state: int = 2,
+    expected_limit: int = 100,
+    *,
+    confirmed: bool = False,
+    age_seconds: float = 0.0,
+) -> WakeupCommand:
+    cmd = WakeupCommand(direction, expected_pack_state, expected_limit)
+    cmd.confirmed = confirmed
+    if age_seconds:
+        cmd.sent_at = datetime.now() - timedelta(seconds=age_seconds)
+    return cmd
 
 
 def _make(
@@ -95,9 +119,9 @@ def _make(
     soc: int = 50,
     min_soc: int = 10,
     flow: PowerFlowState = PowerFlowState.IDLE,
-    wake_started_at: datetime = datetime.min,
+    wakeup_cmd: WakeupCommand | None = None,
 ) -> FakeSMDevice:
-    d = FakeSMDevice(state=state, power_flow_state=flow, wake_started_at=wake_started_at)
+    d = FakeSMDevice(state=state, power_flow_state=flow, wakeup_cmd=wakeup_cmd)
     d.batteryPort.charge_power = charging
     d.batteryPort.discharge_power = discharging
     d.batteryPort.power = discharging - charging
@@ -247,7 +271,8 @@ def test_soc_guard_blocks_wakeup_at_min_soc() -> None:
 
 def test_soc_guard_allows_wakeup_above_min_soc() -> None:
     buf = SmartMode.DISCHARGE_SOC_BUFFER
-    d = _make(DeviceState.ACTIVE, pack_state=2, soc=10 + buf + 1, min_soc=10)
+    d = _make(DeviceState.ACTIVE, pack_state=2, soc=10 + buf + 1, min_soc=10,
+              wakeup_cmd=_cmd())
     assert _sm(d).classify() == PowerFlowState.WAKEUP
 
 
@@ -258,62 +283,122 @@ def test_socfull_guard_no_wakeup_when_not_discharging() -> None:
 
 
 # ---------------------------------------------------------------------------
-#  Matrix: packState=2 — WAKEUP lifecycle
+#  Matrix: packState=0 — Sunset-Bug fix
 # ---------------------------------------------------------------------------
 
-def test_wakeup_valid_sets_wake_started_at() -> None:
-    """First WAKEUP entry: classify() must set wake_started_at."""
-    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10)
-    assert d.wake_started_at == datetime.min
-    result = _sm(d).classify()
-    assert result == PowerFlowState.WAKEUP
-    assert d.wake_started_at != datetime.min
+def test_standby_with_cmd_returns_wakeup() -> None:
+    """packState=0 + wakeup_cmd → WAKEUP (Sunset-Bug fix: SF2400 reports 0 mid-wakeup)."""
+    d = _make(DeviceState.ACTIVE, pack_state=0, wakeup_cmd=_cmd())
+    assert _sm(d).classify() == PowerFlowState.WAKEUP
 
 
-def test_wakeup_does_not_reset_existing_timer() -> None:
-    """Subsequent WAKEUP cycles must not reset an active timer."""
-    t0 = datetime.now() - timedelta(seconds=5)
-    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10, wake_started_at=t0)
-    _sm(d).classify()
-    assert d.wake_started_at == t0  # unchanged
-
-
-def test_wakeup_timeout_reverts_to_idle() -> None:
-    """packState=2 + wake_started_at expired past WAKE_TIMEOUT → IDLE (self-heal)."""
-    expired = datetime.now() - timedelta(seconds=SmartMode.WAKE_TIMEOUT + 1)
-    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10, wake_started_at=expired)
+def test_standby_without_cmd_returns_idle() -> None:
+    """packState=0 + no wakeup_cmd → IDLE."""
+    d = _make(DeviceState.ACTIVE, pack_state=0)
     assert _sm(d).classify() == PowerFlowState.IDLE
 
 
-def test_wakeup_releases_to_discharge_and_clears_timer() -> None:
-    """packState=2 + battery starts discharging → DISCHARGE + wake_started_at cleared."""
-    t0 = datetime.now() - timedelta(seconds=5)
-    d = _make(
-        DeviceState.ACTIVE,
-        discharging=500,
-        pack_state=2,
-        soc=50,
-        min_soc=10,
-        wake_started_at=t0,
-    )
-    result = _sm(d).classify()
-    assert result == PowerFlowState.DISCHARGE
-    assert d.wake_started_at == datetime.min
+# ---------------------------------------------------------------------------
+#  Matrix: packState=1 — startup ramp with/without cmd
+# ---------------------------------------------------------------------------
+
+def test_pack1_not_charging_with_cmd_returns_wakeup() -> None:
+    """packState=1 + acMode=INPUT + battery not yet charging + cmd → WAKEUP (startup ramp)."""
+    d = _make(DeviceState.ACTIVE, charging=0, pack_state=1, ac_mode=AcMode.INPUT,
+              wakeup_cmd=_cmd(AcMode.INPUT, 1, 200))
+    assert _sm(d).classify() == PowerFlowState.WAKEUP
 
 
-def test_update_sets_wakeup_entered_on_first_wakeup_transition() -> None:
-    """update() must record wakeup_entered when transitioning into WAKEUP."""
+def test_pack1_not_charging_without_cmd_returns_idle() -> None:
+    """packState=1 + acMode=INPUT + battery not yet charging + no cmd → IDLE."""
+    d = _make(DeviceState.ACTIVE, charging=0, pack_state=1, ac_mode=AcMode.INPUT)
+    assert _sm(d).classify() == PowerFlowState.IDLE
+
+
+# ---------------------------------------------------------------------------
+#  Matrix: packState=2 — WAKEUP with wakeup_cmd
+# ---------------------------------------------------------------------------
+
+def test_pack2_with_cmd_and_guards_pass_returns_wakeup() -> None:
+    """packState=2 + guards pass + wakeup_cmd → WAKEUP."""
     d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10,
-              flow=PowerFlowState.IDLE)
-    assert d.wakeup_entered == datetime.min
+              wakeup_cmd=_cmd())
+    assert _sm(d).classify() == PowerFlowState.WAKEUP
+
+
+def test_pack2_without_cmd_returns_idle() -> None:
+    """packState=2 + guards pass + no wakeup_cmd → IDLE."""
+    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10)
+    assert _sm(d).classify() == PowerFlowState.IDLE
+
+
+# ---------------------------------------------------------------------------
+#  WakeupCommand lifecycle: update() — confirmation
+# ---------------------------------------------------------------------------
+
+def test_update_confirms_wakeup_cmd_on_matching_echo() -> None:
+    """acMode==direction + limit>=POWER_START → cmd.confirmed=True."""
+    cmd = _cmd(AcMode.OUTPUT, 2, 200)
+    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10,
+              wakeup_cmd=cmd)
+    d.acMode.value = AcMode.OUTPUT
+    d.limitOutput.value = 200
     _sm(d).update()
-    assert d.power_flow_state == PowerFlowState.WAKEUP
-    assert d.wakeup_entered != datetime.min
+    assert d.wakeup_cmd is not None
+    assert d.wakeup_cmd.confirmed is True
 
 
-def test_update_sets_wakeup_committed_on_wakeup_to_discharge() -> None:
-    """update() must set wakeup_committed when WAKEUP → DISCHARGE."""
-    t0 = datetime.now() - timedelta(seconds=5)
+def test_update_cancels_wakeup_cmd_on_stop_echo() -> None:
+    """acMode==direction + limit==0 → wakeup_cmd cleared (STOP echo)."""
+    cmd = _cmd(AcMode.OUTPUT, 2, 200)
+    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10,
+              wakeup_cmd=cmd)
+    d.acMode.value = AcMode.OUTPUT
+    d.limitOutput.value = 0
+    _sm(d).update()
+    assert d.wakeup_cmd is None
+
+
+def test_update_ignores_echo_with_wrong_direction() -> None:
+    """acMode != direction → STOP echo is not processed (avoids false cancellation)."""
+    cmd = _cmd(AcMode.OUTPUT, 2, 200)  # discharge command
+    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10,
+              wakeup_cmd=cmd)
+    d.acMode.value = AcMode.INPUT  # different direction
+    d.limitInput.value = 0         # would cancel if direction matched
+    _sm(d).update()
+    assert d.wakeup_cmd is not None  # must NOT be cancelled
+
+
+# ---------------------------------------------------------------------------
+#  WakeupCommand lifecycle: update() — timeout
+# ---------------------------------------------------------------------------
+
+def test_update_clears_expired_wakeup_cmd() -> None:
+    """wakeup_cmd older than WAKE_TIMEOUT → cleared by update()."""
+    cmd = _cmd(age_seconds=SmartMode.WAKE_TIMEOUT + 1)
+    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10,
+              wakeup_cmd=cmd)
+    _sm(d).update()
+    assert d.wakeup_cmd is None
+
+
+def test_update_keeps_fresh_wakeup_cmd() -> None:
+    """wakeup_cmd within WAKE_TIMEOUT → not cleared."""
+    cmd = _cmd(age_seconds=SmartMode.WAKE_TIMEOUT - 1)
+    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10,
+              wakeup_cmd=cmd)
+    _sm(d).update()
+    assert d.wakeup_cmd is not None
+
+
+# ---------------------------------------------------------------------------
+#  WakeupCommand lifecycle: update() — success transition
+# ---------------------------------------------------------------------------
+
+def test_update_sets_wakeup_just_completed_on_wakeup_to_discharge() -> None:
+    """WAKEUP → DISCHARGE: wakeup_cmd cleared, wakeup_just_completed=True."""
+    cmd = _cmd(AcMode.OUTPUT, 2, 200, age_seconds=2)
     d = _make(
         DeviceState.ACTIVE,
         discharging=500,
@@ -321,11 +406,39 @@ def test_update_sets_wakeup_committed_on_wakeup_to_discharge() -> None:
         soc=50,
         min_soc=10,
         flow=PowerFlowState.WAKEUP,
-        wake_started_at=t0,
+        wakeup_cmd=cmd,
     )
     _sm(d).update()
     assert d.power_flow_state == PowerFlowState.DISCHARGE
-    assert d.wakeup_committed is True
+    assert d.wakeup_cmd is None
+    assert d.wakeup_just_completed is True
+
+
+def test_update_sets_wakeup_just_completed_on_wakeup_to_charge() -> None:
+    """WAKEUP → CHARGE: wakeup_cmd cleared, wakeup_just_completed=True."""
+    cmd = _cmd(AcMode.INPUT, 1, 200, age_seconds=2)
+    d = _make(
+        DeviceState.ACTIVE,
+        charging=500,
+        pack_state=1,
+        ac_mode=AcMode.INPUT,
+        flow=PowerFlowState.WAKEUP,
+        wakeup_cmd=cmd,
+    )
+    _sm(d).update()
+    assert d.power_flow_state == PowerFlowState.CHARGE
+    assert d.wakeup_cmd is None
+    assert d.wakeup_just_completed is True
+
+
+def test_update_does_not_set_wakeup_just_completed_on_idle_to_wakeup() -> None:
+    """IDLE → WAKEUP transition: wakeup_just_completed must stay False."""
+    cmd = _cmd(age_seconds=2)
+    d = _make(DeviceState.ACTIVE, pack_state=2, soc=50, min_soc=10,
+              flow=PowerFlowState.IDLE, wakeup_cmd=cmd)
+    _sm(d).update()
+    assert d.power_flow_state == PowerFlowState.WAKEUP
+    assert d.wakeup_just_completed is False
 
 
 # ---------------------------------------------------------------------------

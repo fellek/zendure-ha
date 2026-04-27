@@ -8,7 +8,7 @@ Current fixtures:
   power_discharge(0 or POWER_IDLE_OFFSET), never power_charge(0).
 - SF 2400 stop-discharge symmetric: STOP_DISCHARGE routes through power_charge.
 - MANUAL mode must bypass hysteresis cooldown (re-arm loop bug).
-- WAKE_PENDING must fall back to IDLE after WAKE_TIMEOUT (sticky WAKEUP bug).
+- Cold-start wake must create a WakeupCommand (replaced old wake_started_at fence).
 """
 
 from __future__ import annotations
@@ -18,13 +18,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_components.zendure_ha.const import DeviceState, ManagerMode, PowerFlowState, SmartMode
+from custom_components.zendure_ha.const import AcMode, DeviceState, ManagerMode, PowerFlowState, SmartMode, WakeupCommand
 from custom_components.zendure_ha.power_strategy import (
     Command,
     DeviceAssignment,
     Direction,
     HysteresisFilter,
-    _recover_wake_timeouts,
     apply_assignment,
     distribute_charge,
     distribute_discharge,
@@ -81,17 +80,17 @@ async def test_stop_charge_with_offgrid_uses_power_discharge_idle_offset() -> No
 
 
 @pytest.mark.asyncio
-async def test_stop_discharge_without_offgrid_uses_power_charge_zero() -> None:
+async def test_stop_discharge_without_offgrid_uses_power_discharge_zero() -> None:
     d = _RecordingDevice(offgrid_consumption=0)
     await apply_assignment(d, DeviceAssignment(Command.STOP_DISCHARGE))
-    assert d.calls == [("charge", 0)]
+    assert d.calls == [("discharge", 0)]
 
 
 @pytest.mark.asyncio
-async def test_stop_discharge_with_offgrid_uses_power_charge_negative_idle_offset() -> None:
+async def test_stop_discharge_with_offgrid_uses_power_discharge_idle_offset() -> None:
     d = _RecordingDevice(offgrid_consumption=50)
     await apply_assignment(d, DeviceAssignment(Command.STOP_DISCHARGE))
-    assert d.calls == [("charge", -SmartMode.POWER_IDLE_OFFSET)]
+    assert d.calls == [("discharge", SmartMode.POWER_IDLE_OFFSET)]
 
 
 @pytest.mark.asyncio
@@ -158,12 +157,7 @@ def test_manual_mode_never_enters_rearm_loop(t0: datetime) -> None:
 
 
 # ---------------------------------------------------------------------------
-#  Sticky WAKEUP bug — regression fence.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-#  Cold-start wake_started_at bug — regression fence.
+#  Cold-start WakeupCommand fence — replaces old wake_started_at regression.
 # ---------------------------------------------------------------------------
 
 
@@ -180,11 +174,17 @@ class _WakeDevice:
         self.state = DeviceState.ACTIVE
         self.electricLevel = SimpleNamespace(asInt=50)
         self.minSoc = SimpleNamespace(asNumber=10.0)
+        self.packState = SimpleNamespace(asInt=0)
         self.charge_limit = -2400
         self.discharge_limit = 2400
-        self.wake_started_at = datetime.min
-        self.wakeup_entered = datetime.min
+        self.charge_optimal = 400
+        self.discharge_optimal = 400
+        self.wakeup_cmd: WakeupCommand | None = None
         self.bypass = SimpleNamespace(is_active=False)
+        self.offgridPort = SimpleNamespace(power_consumption=0, power_production=0)
+        self.solarPort = None
+        self.connectorPort = SimpleNamespace(power=0)
+        self.last_bypass_wake_sent_at = datetime.min
 
     async def power_charge(self, power: int) -> int:
         return power
@@ -209,60 +209,30 @@ def _cold_start_mgr(d: _WakeDevice) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_cold_start_discharge_sets_wake_started_at(t0: datetime) -> None:
-    """Regression: cold-start discharge wake must set wake_started_at.
+async def test_cold_start_discharge_creates_wakeup_cmd(t0: datetime) -> None:
+    """Cold-start discharge must create a WakeupCommand (discharge direction).
 
-    Before the fix, only wakeup_entered was set. _recover_wake_timeouts checks
-    wake_started_at, so time - datetime.min ≈ 63 Gs always exceeded WAKE_TIMEOUT,
-    reverting the device to IDLE on every cycle (~5 s) instead of after 15 s.
+    Historical context: before the WakeupCommand refactor, wake_started_at and
+    wakeup_entered were set separately. A bug where only wakeup_entered was set
+    caused _recover_wake_timeouts to fire immediately (time - datetime.min ≈ 63 Gs).
+    Now a single WakeupCommand.sent_at carries the timer.
     """
     d = _WakeDevice()
     await distribute_discharge(_cold_start_mgr(d), setpoint=200, time=t0)
 
-    assert d.power_flow_state == PowerFlowState.WAKEUP
-    assert d.wakeup_entered == t0
-    assert d.wake_started_at == t0, "wake_started_at not set — timeout fires immediately"
+    assert d.wakeup_cmd is not None, "wakeup_cmd not set — timeout fires immediately"
+    assert d.wakeup_cmd.direction == AcMode.OUTPUT
+    assert d.wakeup_cmd.expected_pack_state == 2
+    assert d.wakeup_cmd.expected_limit >= SmartMode.POWER_START
 
 
 @pytest.mark.asyncio
-async def test_cold_start_charge_sets_wake_started_at(t0: datetime) -> None:
-    """Regression: cold-start charge wake must set wake_started_at (symmetric fix)."""
+async def test_cold_start_charge_creates_wakeup_cmd(t0: datetime) -> None:
+    """Cold-start charge must create a WakeupCommand (charge direction)."""
     d = _WakeDevice()
     await distribute_charge(_cold_start_mgr(d), setpoint=-200, time=t0)
 
-    assert d.power_flow_state == PowerFlowState.WAKEUP
-    assert d.wakeup_entered == t0
-    assert d.wake_started_at == t0, "wake_started_at not set — timeout fires immediately"
-
-
-@pytest.mark.asyncio
-async def test_cold_start_timeout_survives_full_wake_cycle(t0: datetime) -> None:
-    """After a cold-start wake, _recover_wake_timeouts must not fire for WAKE_TIMEOUT seconds."""
-    d = _WakeDevice()
-    await distribute_discharge(_cold_start_mgr(d), setpoint=200, time=t0)
-
-    # 1 s later — must still be WAKEUP
-    recovered = _recover_wake_timeouts([d], t0 + timedelta(seconds=1))
-    assert recovered == []
-    assert d.power_flow_state == PowerFlowState.WAKEUP
-
-    # Just past WAKE_TIMEOUT — must revert
-    recovered = _recover_wake_timeouts([d], t0 + timedelta(seconds=SmartMode.WAKE_TIMEOUT + 1))
-    assert recovered == [d]
-    assert d.power_flow_state == PowerFlowState.IDLE
-
-
-def test_wake_timeout_recovers_stuck_device(t0: datetime) -> None:
-    """Historical bug: once power_flow_state=WAKEUP was set, both wake passes
-    excluded the device, leaving it permanently deadlocked if the battery never
-    responded. _recover_wake_timeouts must flip the device back to IDLE after
-    SmartMode.WAKE_TIMEOUT seconds.
-    """
-    stuck = SimpleNamespace(
-        name="stuck",
-        power_flow_state=PowerFlowState.WAKEUP,
-        wake_started_at=t0 - timedelta(seconds=SmartMode.WAKE_TIMEOUT + 1),
-    )
-    recovered = _recover_wake_timeouts([stuck], t0)
-    assert recovered == [stuck]
-    assert stuck.power_flow_state == PowerFlowState.IDLE
+    assert d.wakeup_cmd is not None, "wakeup_cmd not set — timeout fires immediately"
+    assert d.wakeup_cmd.direction == AcMode.INPUT
+    assert d.wakeup_cmd.expected_pack_state == 1
+    assert d.wakeup_cmd.expected_limit >= SmartMode.POWER_START

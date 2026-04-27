@@ -1,6 +1,9 @@
 """Constants for Zendure."""
 
-from datetime import timedelta
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
 
 DOMAIN = "zendure_ha"
@@ -154,3 +157,23 @@ class SmartMode:
     # Mit DISCHARGE_SOC_BUFFER = 2 stoppt die HA-Steuerung bei MinSOC + 2%.
     # Der SF2400 AC darf selbst dann noch die restlichen 2% abbauen.
     DISCHARGE_SOC_BUFFER = 2
+
+
+@dataclass
+class WakeupCommand:
+    """Tracks a single pending wakeup command from send to hardware confirmation.
+
+    Lifecycle (managed by DevicePowerFlowStateMachine.update()):
+      1. Created by _select_and_wake() / bypass-wake when a command is sent.
+      2. confirmed=True when firmware echo: acMode==direction AND limit >= POWER_START.
+      3. Cleared (set to None) when:
+           - packState reaches expected_pack_state AND batteryPort.power > POWER_START  (success)
+           - acMode==direction AND limit==0 arrives                                     (stop echo)
+           - time since sent_at exceeds WAKE_TIMEOUT                                    (timeout)
+    """
+
+    direction: int            # AcMode.INPUT (1) or AcMode.OUTPUT (2)
+    expected_pack_state: int  # 1=charging, 2=discharging
+    expected_limit: int       # sent outputLimit / abs(inputLimit); always >= POWER_START
+    sent_at: datetime = field(default_factory=datetime.now)
+    confirmed: bool = False   # True once firmware echoes matching acMode + limit >= POWER_START

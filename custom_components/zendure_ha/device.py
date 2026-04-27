@@ -18,7 +18,7 @@ from paho.mqtt import client as mqtt_client
 from .binary_sensor import ZendureBinarySensor
 from .bypass_relay import BypassRelay
 from .button import ZendureButton
-from .const import DeviceState, FuseGroupType, PowerFlowState, SmartMode
+from .const import DeviceState, FuseGroupType, PowerFlowState, SmartMode, WakeupCommand
 from .entity import EntityDevice, EntityZendure
 from .number import ZendureNumber
 from .select import ZendureRestoreSelect, ZendureSelect
@@ -84,13 +84,14 @@ class ZendureDevice(EntityDevice):
         self.actualKwh: float = 0.0
         self.state: DeviceState = DeviceState.OFFLINE
         self.power_flow_state: PowerFlowState = PowerFlowState.OFF
-        self.wake_started_at: datetime = datetime.min
-        self.wakeup_entered: datetime = datetime.min
-        # Consumable signal: True im Zyklus nach WAKEUP → CHARGE/DISCHARGE.
-        # Von `_distribute_power` gelesen + gelöscht, um die Hysterese zurück-
-        # zusetzen (sonst würgt der Direction-Change-Filter den frischen Wake
-        # auf setpoint=0 ab → Abschalt-Transient → Moduswechsel-Flattern).
-        self.wakeup_committed: bool = False
+        # Pending wakeup command; None when no command is outstanding.
+        # Lifecycle managed by DevicePowerFlowStateMachine.update().
+        self.wakeup_cmd: WakeupCommand | None = None
+        # Consumable: set True by update() on successful WAKEUP→DISCHARGE/CHARGE transition.
+        # Read and cleared by _distribute_power() to trigger hysteresis.reset().
+        self.wakeup_just_completed: bool = False
+        # Bypass-wake cooldown: tracks last Pass-1 bypass command time per device.
+        self.last_bypass_wake_sent_at: datetime = datetime.min
 
         self.create_entities()
         self.bypass = BypassRelay(self)
